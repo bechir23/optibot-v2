@@ -46,10 +46,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Simple in-memory rate limiter per tenant for /api/call endpoint.
+    """Rate limiter per tenant+IP for /api/call endpoint.
 
-    Uses a sliding window counter. Not distributed — for single-instance use.
-    For multi-instance, use Redis-based rate limiting.
+    Tries Redis first (distributed, multi-instance safe).
+    Falls back to in-memory sliding window for single-instance use.
     """
 
     def __init__(self, app, max_requests: int = 60, window_seconds: int = 60):
@@ -58,19 +58,48 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._window = window_seconds
         self._requests: dict[str, list[float]] = defaultdict(list)
 
+    @staticmethod
+    def _scope_key(request: Request) -> str:
+        """Scope rate limiting by tenant + client IP to prevent spoofing."""
+        tenant = getattr(request.state, "tenant_id", "") or "unknown"
+        client_ip = request.client.host if request.client else "unknown"
+        return f"{tenant}:{client_ip}"
+
     async def dispatch(self, request: Request, call_next):
         if request.url.path != "/api/call" or request.method != "POST":
             return await call_next(request)
 
-        tenant = request.headers.get("X-Tenant-ID", request.client.host if request.client else "unknown")
+        scope_key = self._scope_key(request)
         now = time.monotonic()
 
-        # Clean old entries
-        window_start = now - self._window
-        self._requests[tenant] = [t for t in self._requests[tenant] if t > window_start]
+        # Try Redis-backed rate limiting first (distributed)
+        try:
+            from app.main import app_state
+            redis_client = getattr(app_state, "redis", None) if app_state is not None else None
+        except Exception:
+            redis_client = None
 
-        if len(self._requests[tenant]) >= self._max:
-            logger.warning("Rate limit exceeded for tenant %s", tenant)
+        if redis_client is not None:
+            bucket = int(time.time() // self._window)
+            redis_key = f"ratelimit:{scope_key}:{bucket}"
+            count = await redis_client.incr(redis_key, ttl=self._window + 1)
+            if count is not None and count > self._max:
+                logger.warning("Rate limit exceeded for scope %s via Redis", scope_key)
+                return Response(
+                    content='{"detail":"Rate limit exceeded. Try again later."}',
+                    status_code=429,
+                    media_type="application/json",
+                    headers={"Retry-After": str(self._window)},
+                )
+            if count is not None:
+                return await call_next(request)
+
+        # Fallback: in-memory sliding window
+        window_start = now - self._window
+        self._requests[scope_key] = [t for t in self._requests[scope_key] if t > window_start]
+
+        if len(self._requests[scope_key]) >= self._max:
+            logger.warning("Rate limit exceeded for scope %s", scope_key)
             return Response(
                 content='{"detail":"Rate limit exceeded. Try again later."}',
                 status_code=429,
@@ -78,7 +107,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 headers={"Retry-After": str(self._window)},
             )
 
-        self._requests[tenant].append(now)
+        self._requests[scope_key].append(now)
         return await call_next(request)
 
 

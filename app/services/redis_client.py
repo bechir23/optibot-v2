@@ -125,6 +125,20 @@ class RedisClient:
             await self._record_failure()
             return False
 
+    async def incr(self, key: str, ttl: int | None = None) -> int | None:
+        """Atomically increment an integer key. Set expiry on first write if ttl given."""
+        if self._circuit_is_open() or not self._client:
+            return None
+        try:
+            value = await self._client.incr(key)
+            if ttl is not None and value == 1:
+                await self._client.expire(key, ttl)
+            await self._record_success()
+            return int(value)
+        except Exception:
+            await self._record_failure()
+            return None
+
     async def health_check(self) -> bool:
         """Ping Redis. Used by /health endpoint."""
         if not self._client:

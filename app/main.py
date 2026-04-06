@@ -368,6 +368,22 @@ def _start_worker_heartbeat_thread() -> threading.Event | None:
 
 
 # ── LiveKit Agent Server ───────────────────────────────
+
+
+async def _restore_call_state(call_id: str) -> dict[str, Any] | None:
+    """Try to restore existing call state from Redis for crash recovery."""
+    if not app_state.call_state:
+        return None
+    try:
+        existing = await app_state.call_state.get(call_id)
+    except Exception as exc:
+        logger.warning("Failed to read existing call state for %s: %s", call_id, exc)
+        return None
+    if not existing or existing.get("phase") in ("completed", "error"):
+        return None
+    return existing
+
+
 async def outbound_session(ctx):
     """Handle one outbound call session."""
     from livekit import api, rtc
@@ -389,12 +405,20 @@ async def outbound_session(ctx):
     # Metrics: mark active call as soon as session starts.
     record_call_started(tenant_id=tenant_id, mutuelle=mutuelle)
 
-    # Track call state in Redis
-    if app_state.call_state:
+    # Check for existing call state (crash recovery / reconnect)
+    restored_state = await _restore_call_state(ctx.room.name)
+
+    if app_state.call_state and restored_state is None:
         await app_state.call_state.initialize(
             call_id=ctx.room.name,
             tenant_id=tenant_id,
             mutuelle=dossier.get("mutuelle", ""),
+        )
+    elif app_state.call_state and restored_state is not None:
+        logger.info("Restored outbound call state for %s at phase=%s", ctx.room.name, restored_state.get("phase"))
+        await app_state.call_state.checkpoint(
+            ctx.room.name,
+            event="session_restored",
         )
 
     async def _dial_sip_participant() -> None:
@@ -841,12 +865,20 @@ async def inbound_session(ctx):
 
     record_call_started(tenant_id=tenant_id, mutuelle="inbound")
 
-    if app_state.call_state:
+    restored_state = await _restore_call_state(ctx.room.name)
+
+    if app_state.call_state and restored_state is None:
         await app_state.call_state.initialize(
             call_id=ctx.room.name,
             tenant_id=tenant_id,
             mutuelle="inbound",
             phase="ringing",
+        )
+    elif app_state.call_state and restored_state is not None:
+        logger.info("Restored inbound call state for %s at phase=%s", ctx.room.name, restored_state.get("phase"))
+        await app_state.call_state.checkpoint(
+            ctx.room.name,
+            event="session_restored",
         )
 
     # Inbound agent: receptionist mode — greet caller, identify purpose, route

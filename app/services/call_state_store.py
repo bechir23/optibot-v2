@@ -53,6 +53,19 @@ class CallStateStore:
             "tools_called": [],
             "events": [{"ts": time.time(), "event": "initialized"}],
             "started_at": time.time(),
+            "extracted": {},
+            "ivr_path": [],
+            "ivr_transcript": [],
+            "unresolved_goals": [],
+            "last_tool_name": "",
+            "last_tool_output": "",
+            "last_user_utterance": "",
+            "retry_counters": {},
+            "pending_prefixes": [],
+            "llm_timeouts": 0,
+            "handoff_depth": 0,
+            "max_handoff_depth": 2,
+            "durable_write_failures": 0,
         }
         await self._redis.setex(self._key(call_id), self._ttl, json.dumps(state))
 
@@ -70,6 +83,67 @@ class CallStateStore:
                 })
             except Exception as e:
                 logger.warning("call_log insert failed: %s", e)
+
+    async def checkpoint(
+        self,
+        call_id: str,
+        *,
+        phase: str | None = None,
+        extracted: dict | None = None,
+        unresolved_goals: list[str] | None = None,
+        ivr_path: list[str] | None = None,
+        ivr_transcript: list[str] | None = None,
+        hold_timeline: list[dict] | None = None,
+        last_tool_name: str | None = None,
+        last_tool_output: str | None = None,
+        last_user_utterance: str | None = None,
+        retry_counters: dict[str, int] | None = None,
+        pending_prefixes: list[str] | None = None,
+        llm_timeouts: int | None = None,
+        handoff_depth: int | None = None,
+        max_handoff_depth: int | None = None,
+        durable_write_failures: int | None = None,
+        event: str = "",
+        durable: bool = False,
+    ) -> None:
+        """Update call state checkpoint in Redis. Only non-None fields are updated."""
+        raw = await self._redis.get(self._key(call_id))
+        if not raw:
+            return
+        state = json.loads(raw)
+        if phase is not None:
+            state["phase"] = phase
+        if extracted is not None:
+            state["extracted"] = extracted
+        if unresolved_goals is not None:
+            state["unresolved_goals"] = unresolved_goals
+        if ivr_path is not None:
+            state["ivr_path"] = ivr_path
+        if ivr_transcript is not None:
+            state["ivr_transcript"] = ivr_transcript
+        if hold_timeline is not None:
+            state["hold_timeline"] = hold_timeline
+        if last_tool_name is not None:
+            state["last_tool_name"] = last_tool_name
+        if last_tool_output is not None:
+            state["last_tool_output"] = last_tool_output
+        if last_user_utterance is not None:
+            state["last_user_utterance"] = last_user_utterance
+        if retry_counters is not None:
+            state["retry_counters"] = retry_counters
+        if pending_prefixes is not None:
+            state["pending_prefixes"] = pending_prefixes
+        if llm_timeouts is not None:
+            state["llm_timeouts"] = llm_timeouts
+        if handoff_depth is not None:
+            state["handoff_depth"] = handoff_depth
+        if max_handoff_depth is not None:
+            state["max_handoff_depth"] = max_handoff_depth
+        if durable_write_failures is not None:
+            state["durable_write_failures"] = durable_write_failures
+        if event:
+            state["events"].append({"ts": time.time(), "event": event})
+        await self._redis.setex(self._key(call_id), self._ttl, json.dumps(state))
 
     async def mark_phase(self, call_id: str, phase: str, event: str = "") -> None:
         raw = await self._redis.get(self._key(call_id))
