@@ -173,14 +173,8 @@ def set_runtime_patterns(patterns: dict[str, str], version: int) -> None:
                 pass  # Keep existing compiled regex
 
 
-def normalize_for_tts(text: str, use_ssml: bool = False) -> str:
-    """Normalize text for TTS. Returns SSML if use_ssml=True, else plain text.
-
-    For Cartesia (our primary TTS): returns plain text with expanded forms.
-    For SSML-capable providers: returns full SSML markup.
-    """
-    if use_ssml:
-        return _to_ssml(text)
+def normalize_for_tts(text: str) -> str:
+    """Normalize text for Cartesia TTS — expand abbreviations, format numbers for speech."""
     return _to_plain(text)
 
 
@@ -226,56 +220,6 @@ def _to_plain(text: str) -> str:
     text = _DATE_RE.sub(lambda m: f"{m.group(1)} {_month_name(m.group(2))} {m.group(3)}", text)
 
     return text
-
-
-def _to_ssml(text: str) -> str:
-    """Full SSML markup for SSML-capable TTS providers."""
-    # Expand abbreviations with <sub>
-    text = _ABBREV_RE.sub(
-        lambda m: f'<sub alias="{_get_abbreviations().get(m.group(0), m.group(0))}">{m.group(0)}</sub>',
-        text,
-    )
-
-    # Phone numbers with <say-as interpret-as="telephone">
-    text = _PHONE_RE.sub(
-        lambda m: f'<say-as interpret-as="telephone">{m.group(0)}</say-as>',
-        text,
-    )
-
-    # Long numbers spelled out
-    text = _LONG_NUM_RE.sub(
-        lambda m: f'<say-as interpret-as="characters">{m.group(0)}</say-as>',
-        text,
-    )
-
-    # Euro amounts
-    text = _EURO_RE.sub(
-        lambda m: f'<say-as interpret-as="cardinal">{m.group(1)}</say-as> euros'
-        + (f' et <say-as interpret-as="cardinal">{m.group(2)}</say-as> centimes' if m.group(2) else ""),
-        text,
-    )
-
-    # Dates
-    text = _DATE_RE.sub(
-        lambda m: f'<say-as interpret-as="date" format="dmy">{m.group(0)}</say-as>',
-        text,
-    )
-
-    # Wrap in speak+voice
-    return (
-        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="fr-FR">'
-        f'<voice name="fr-FR-DeniseNeural">'
-        f'<prosody rate="0.95">{text}</prosody>'
-        f'</voice></speak>'
-    )
-
-
-def add_pause(text: str, position: str = "after", duration_ms: int = 300) -> str:
-    """Add a pause marker for TTS. Plain text version uses '...' marker."""
-    pause = "..." if duration_ms < 500 else "...... "
-    if position == "before":
-        return pause + text
-    return text + pause
 
 
 _FALLBACK_MONTHS = {

@@ -1,6 +1,6 @@
 """Tests for SSML normalizer — French telephony text normalization."""
 import pytest
-from app.pipeline.ssml_normalizer import normalize_for_tts, add_pause, ABBREVIATIONS, _month_name
+from app.pipeline.ssml_normalizer import normalize_for_tts, ABBREVIATIONS, _month_name
 
 
 class TestAbbreviationExpansion:
@@ -72,36 +72,6 @@ class TestDateFormatting:
     def test_date_with_dashes(self):
         result = normalize_for_tts("Le 15-03-2025")
         assert "mars" in result
-
-
-class TestSSMLOutput:
-    def test_ssml_wraps_in_speak(self):
-        result = normalize_for_tts("Bonjour", use_ssml=True)
-        assert result.startswith('<speak')
-        assert 'xml:lang="fr-FR"' in result
-        assert '</speak>' in result
-
-    def test_ssml_has_prosody(self):
-        result = normalize_for_tts("Bonjour", use_ssml=True)
-        assert '<prosody rate=' in result
-
-    def test_ssml_sub_for_abbreviations(self):
-        result = normalize_for_tts("Le CPAM valide", use_ssml=True)
-        assert '<sub alias=' in result
-
-
-class TestPause:
-    def test_add_pause_after(self):
-        result = add_pause("Bonjour")
-        assert result.endswith("...")
-
-    def test_add_pause_before(self):
-        result = add_pause("suite", position="before")
-        assert result.startswith("...")
-
-    def test_long_pause(self):
-        result = add_pause("Attendez", duration_ms=600)
-        assert "......" in result
 
 
 class TestMonthNames:

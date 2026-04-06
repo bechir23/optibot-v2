@@ -2,15 +2,41 @@
 
 Handles all DB operations: dossier lookup, call persistence, RAG retrieval.
 Uses httpx for async HTTP calls to Supabase REST API.
+Writes use exponential backoff (3 attempts) to survive transient failures.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_WRITE_MAX_RETRIES = 3
+_WRITE_BASE_DELAY = 0.5  # seconds
+
+
+async def _retry_write(operation, *args, **kwargs) -> Any:
+    """Execute a write operation with exponential backoff on transient failures."""
+    last_exc = None
+    for attempt in range(_WRITE_MAX_RETRIES):
+        try:
+            return await operation(*args, **kwargs)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as exc:
+            last_exc = exc
+            # Don't retry client errors (4xx) except 429 (rate limit)
+            if isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500 and exc.response.status_code != 429:
+                raise
+            delay = _WRITE_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                "Supabase write attempt %d/%d failed: %s — retrying in %.1fs",
+                attempt + 1, _WRITE_MAX_RETRIES, exc, delay,
+            )
+            await asyncio.sleep(delay)
+    logger.error("Supabase write failed after %d attempts: %s", _WRITE_MAX_RETRIES, last_exc)
+    raise last_exc
 
 
 class SupabaseClient:
@@ -61,20 +87,28 @@ class SupabaseClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def insert(self, table: str, data: dict | list[dict]) -> list[dict]:
-        """Insert row(s) into a table."""
+    async def _insert_once(self, table: str, data: dict | list[dict]) -> list[dict]:
+        """Single insert attempt."""
         await self._ensure_client()
         resp = await self._client.post(f"/{table}", json=data)
         resp.raise_for_status()
         return resp.json()
 
-    async def update(self, table: str, filters: dict[str, str], data: dict) -> list[dict]:
-        """Update rows matching filters."""
+    async def insert(self, table: str, data: dict | list[dict]) -> list[dict]:
+        """Insert row(s) into a table with retry on transient failures."""
+        return await _retry_write(self._insert_once, table, data)
+
+    async def _update_once(self, table: str, filters: dict[str, str], data: dict) -> list[dict]:
+        """Single update attempt."""
         await self._ensure_client()
         params = {k: f"eq.{v}" for k, v in filters.items()}
         resp = await self._client.patch(f"/{table}", json=data, params=params)
         resp.raise_for_status()
         return resp.json()
+
+    async def update(self, table: str, filters: dict[str, str], data: dict) -> list[dict]:
+        """Update rows matching filters with retry on transient failures."""
+        return await _retry_write(self._update_once, table, filters, data)
 
     async def select_tenant(
         self,
