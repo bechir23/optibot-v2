@@ -194,8 +194,8 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         if self._call_state_store and self._call_id:
             try:
                 await self._call_state_store.append_tool_call(self._call_id, name)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to persist tool call %s: %s", name, e)
         observe_tool_latency_ms((time.monotonic() - started) * 1000.0)
 
     async def _finalize_call(self) -> None:

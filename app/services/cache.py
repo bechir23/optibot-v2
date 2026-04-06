@@ -99,8 +99,8 @@ class TieredCache:
         try:
             serialized = json.dumps(value, default=str)
             await self._redis.setex(f"cache:{key}", l2_ttl, serialized)
-        except Exception:
-            logger.debug("Cache L2 set failed: %s", key)
+        except Exception as e:
+            logger.warning("Cache L2 set failed for key=%s: %s", key, e)
 
     async def delete(self, key: str) -> None:
         """Invalidate across all tiers."""

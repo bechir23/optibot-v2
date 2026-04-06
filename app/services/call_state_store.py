@@ -69,7 +69,7 @@ class CallStateStore:
                     "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 })
             except Exception as e:
-                logger.debug("call_log insert: %s", e)
+                logger.warning("call_log insert failed: %s", e)
 
     async def mark_phase(self, call_id: str, phase: str, event: str = "") -> None:
         raw = await self._redis.get(self._key(call_id))
@@ -126,4 +126,4 @@ class CallStateStore:
                     "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 })
             except Exception as e:
-                logger.debug("call_log finalize: %s", e)
+                logger.warning("call_log finalize failed: %s", e)

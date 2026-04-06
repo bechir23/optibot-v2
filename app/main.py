@@ -990,16 +990,17 @@ async def dispatch_outbound_call(
         "sip_trunk_id": sip_trunk_id or settings.telnyx_sip_trunk_id,
     })
 
-    await lk.agent_dispatch.create_dispatch(
-        lkapi.CreateAgentDispatchRequest(
-            agent_name=settings.agent_name,
-            room=room_name,
-            metadata=metadata,
+    try:
+        await lk.agent_dispatch.create_dispatch(
+            lkapi.CreateAgentDispatchRequest(
+                agent_name=settings.agent_name,
+                room=room_name,
+                metadata=metadata,
+            )
         )
-    )
-
-    await lk.aclose()
-    return room_name
+        return room_name
+    finally:
+        await lk.aclose()
 
 
 if __name__ == "__main__":
