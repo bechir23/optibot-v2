@@ -1,0 +1,8 @@
+{
+  "\\bg\\s*mail\\b": "gmail",
+  "\\bhot\\s*mail\\b": "hotmail",
+  "\\bout\\s*look\\b": "outlook",
+  "\\bya\\s*hoo\\b": "yahoo",
+  "\\bla\\s*poste\\b": "laposte",
+  "\\bwana\\s*doo\\b": "wanadoo"
+}

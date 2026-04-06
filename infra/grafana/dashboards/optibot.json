@@ -1,0 +1,152 @@
+{
+  "id": null,
+  "uid": "optibot-main",
+  "title": "OptiBot v2 — Voice AI Dashboard",
+  "tags": ["optibot", "voice-ai", "production"],
+  "timezone": "Europe/Paris",
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "tenant_id",
+        "type": "query",
+        "query": "label_values(optibot_calls_total, tenant_id)",
+        "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"},
+        "refresh": 2
+      },
+      {
+        "name": "mutuelle",
+        "type": "query",
+        "query": "label_values(optibot_calls_total{tenant_id=~\"$tenant_id\"}, mutuelle)",
+        "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"},
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "title": "Active Calls", "type": "gauge",
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "sum(optibot_calls_active{tenant_id=~\"$tenant_id\"})"}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 5, "color": "yellow"}, {"value": 10, "color": "red"}]}}}
+    },
+    {
+      "id": 2, "title": "Calls Today", "type": "stat",
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "sum(increase(optibot_calls_total{tenant_id=~\"$tenant_id\", mutuelle=~\"$mutuelle\"}[24h]))"}]
+    },
+    {
+      "id": 3, "title": "Success Rate", "type": "stat",
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "sum(increase(optibot_calls_completed_total{tenant_id=~\"$tenant_id\"}[24h])) / (sum(increase(optibot_calls_total{tenant_id=~\"$tenant_id\"}[24h])) > 0) * 100"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [{"value": 0, "color": "red"}, {"value": 90, "color": "yellow"}, {"value": 95, "color": "green"}]}}}
+    },
+    {
+      "id": 4, "title": "Failed Calls", "type": "stat",
+      "gridPos": {"h": 5, "w": 4, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "sum(increase(optibot_calls_failed_total{tenant_id=~\"$tenant_id\"}[24h]))"}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 3, "color": "yellow"}, {"value": 10, "color": "red"}]}}}
+    },
+    {
+      "id": 5, "title": "p95 LLM Latency (ms)", "type": "stat",
+      "gridPos": {"h": 5, "w": 4, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "histogram_quantile(0.95, rate(optibot_call_llm_latency_ms_bucket[5m]))"}],
+      "fieldConfig": {"defaults": {"unit": "ms", "thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 1000, "color": "yellow"}, {"value": 3000, "color": "red"}]}}}
+    },
+    {
+      "id": 6, "title": "p95 TTS First Audio (ms)", "type": "stat",
+      "gridPos": {"h": 5, "w": 4, "x": 20, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "histogram_quantile(0.95, rate(optibot_call_tts_first_audio_ms_bucket[5m]))"}],
+      "fieldConfig": {"defaults": {"unit": "ms", "thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 500, "color": "yellow"}, {"value": 1500, "color": "red"}]}}}
+    },
+    {
+      "id": 10, "title": "Call Rate by Mutuelle", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "rate(optibot_calls_total{tenant_id=~\"$tenant_id\", mutuelle=~\"$mutuelle\"}[5m])", "legendFormat": "{{mutuelle}}"}]
+    },
+    {
+      "id": 11, "title": "Call Outcomes", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {"expr": "rate(optibot_calls_completed_total{tenant_id=~\"$tenant_id\"}[5m])", "legendFormat": "completed: {{outcome}}"},
+        {"expr": "rate(optibot_calls_failed_total{tenant_id=~\"$tenant_id\"}[5m])", "legendFormat": "failed: {{reason}}"}
+      ]
+    },
+    {
+      "id": 20, "title": "Pipeline Latency (p95)", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, rate(optibot_call_stt_latency_ms_bucket[5m]))", "legendFormat": "STT"},
+        {"expr": "histogram_quantile(0.95, rate(optibot_call_llm_latency_ms_bucket[5m]))", "legendFormat": "LLM"},
+        {"expr": "histogram_quantile(0.95, rate(optibot_call_tts_first_audio_ms_bucket[5m]))", "legendFormat": "TTS First Audio"},
+        {"expr": "histogram_quantile(0.95, rate(optibot_call_rag_retrieve_ms_bucket[5m]))", "legendFormat": "RAG"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "id": 21, "title": "Call Duration Distribution", "type": "histogram",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "rate(optibot_call_duration_seconds_bucket[5m])", "legendFormat": "{{le}}"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "id": 30, "title": "IVR Navigation", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {"expr": "rate(optibot_call_ivr_dtmf_sent_total{tenant_id=~\"$tenant_id\"}[5m])", "legendFormat": "DTMF: {{digit}}"},
+        {"expr": "rate(optibot_call_ivr_stuck_total{tenant_id=~\"$tenant_id\"}[5m])", "legendFormat": "IVR Stuck"}
+      ]
+    },
+    {
+      "id": 31, "title": "Hold Events", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "rate(optibot_hold_events_total{tenant_id=~\"$tenant_id\"}[5m])", "legendFormat": "{{event}}"}]
+    },
+    {
+      "id": 32, "title": "Cache Performance", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 21},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {"expr": "rate(optibot_cache_hits_total[5m])", "legendFormat": "Hits: {{tier}}"},
+        {"expr": "rate(optibot_cache_misses_total[5m])", "legendFormat": "Misses: {{tier}}"}
+      ]
+    },
+    {
+      "id": 40, "title": "Tool Usage", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [{"expr": "rate(optibot_tool_calls_total{tenant_id=~\"$tenant_id\"}[5m])", "legendFormat": "{{tool_name}}"}]
+    },
+    {
+      "id": 41, "title": "System Health", "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29},
+      "datasource": {"type": "prometheus", "uid": "PBFA97CFB590B2093"},
+      "targets": [
+        {"expr": "process_resident_memory_bytes / 1024 / 1024", "legendFormat": "Memory (MB)"},
+        {"expr": "rate(optibot_call_llm_fallback_total[5m])", "legendFormat": "LLM Fallbacks"},
+        {"expr": "rate(optibot_call_json_repair_total[5m])", "legendFormat": "JSON Repairs"}
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 2,
+  "editable": true
+}

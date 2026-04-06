@@ -1,0 +1,21 @@
+{
+  "CPAM": "C.P.A.M.",
+  "NIR": "numéro d'inscription au répertoire",
+  "FINESS": "F.I.N.E.S.S.",
+  "LPP": "L.P.P.",
+  "AMC": "assurance maladie complémentaire",
+  "AMO": "assurance maladie obligatoire",
+  "CMU": "C.M.U.",
+  "CSS": "C.S.S.",
+  "ACS": "A.C.S.",
+  "SESAM": "SÉSAM",
+  "NOEMIE": "NOÉMIE",
+  "SCOR": "S.C.O.R.",
+  "ROC": "R.O.C.",
+  "PEC": "prise en charge",
+  "RAC": "reste à charge",
+  "BR": "base de remboursement",
+  "TM": "ticket modérateur",
+  "TP": "tiers payant",
+  "100%": "cent pour cent"
+}

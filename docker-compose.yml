@@ -1,0 +1,129 @@
+services:
+  # ── OptiBot API (FastAPI — HTTP endpoints) ───────────
+  optibot-api:
+    build: .
+    ports: ["8080:8080"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      livekit: { condition: service_started }
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      LIVEKIT_URL: ${LIVEKIT_URL:?set LIVEKIT_URL in .env}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY in .env}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── OptiBot Worker (LiveKit Agent — handles voice calls) ──
+  optibot-worker:
+    build: .
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      livekit: { condition: service_started }
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      LIVEKIT_URL: ${LIVEKIT_URL:?set LIVEKIT_URL in .env}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY in .env}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in .env}
+      WORKER_HEARTBEAT_KEY: worker:heartbeat
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    command: ["python", "-m", "app.main", "start"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,sys,redis; r=redis.Redis.from_url(os.getenv('REDIS_URL','redis://redis:6379/0')); key=os.getenv('WORKER_HEARTBEAT_KEY','worker:heartbeat'); sys.exit(0 if r.get(key) else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    restart: unless-stopped
+
+  # ── LiveKit Server (WebRTC + SIP) ───────────────────
+  livekit:
+    image: livekit/livekit-server:latest
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "6789:6789"
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+    volumes:
+      - ./infra/livekit.yaml:/etc/livekit.yaml
+    command: --config /etc/livekit.yaml
+
+  # ── Redis (cache + state + pub/sub + features) ───────
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - redis-data:/data
+
+  # ── Redis Exporter (Prometheus Redis metrics) ──────────
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    ports: ["9121:9121"]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      redis: { condition: service_healthy }
+
+  # ── Jaeger (distributed tracing) ─────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.56
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  # ── Prometheus (metrics) ─────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    ports: ["9090:9090"]
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+
+  # ── Grafana (dashboards) ─────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports: ["3001:3000"]
+    volumes:
+      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+
+volumes:
+  redis-data:
+  prometheus-data:
+  grafana-data:

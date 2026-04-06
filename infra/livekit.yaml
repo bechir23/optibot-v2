@@ -1,0 +1,16 @@
+port: 7880
+rtc:
+  port_range_start: 50000
+  port_range_end: 60000
+  tcp_port: 7881
+  use_external_ip: false
+
+keys:
+  devkey: secret_must_be_at_least_32chars_long_for_livekit
+
+logging:
+  level: info
+  json: true
+
+# Expose Prometheus metrics for LiveKit server.
+prometheus_port: 6789

@@ -1,0 +1,69 @@
+[project]
+name = "optibot-v2"
+version = "0.1.0"
+description = "Production Voice AI SaaS for French opticians — outbound calls to mutuelles"
+requires-python = ">=3.12"
+dependencies = [
+    # LiveKit Agents + plugins
+    "livekit>=0.17.0",
+    "livekit-agents>=1.5.0",
+    "livekit-plugins-deepgram>=1.0.0",
+    "livekit-plugins-cartesia>=1.0.0",
+    "livekit-plugins-openai>=1.0.0",
+    "livekit-plugins-silero>=1.0.0",
+    "livekit-plugins-noise-cancellation>=0.2.3",
+    "livekit-plugins-turn-detector>=1.0.0",
+    # LLM providers
+    "mistralai>=1.0.0",
+    "groq>=0.9.0",
+    "json-repair>=0.30.0",
+    "tiktoken>=0.7.0",
+    # Infrastructure
+    "redis[hiredis]>=5.0.0",
+    "supabase>=2.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    # Observability
+    "opentelemetry-api>=1.24.0",
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-exporter-otlp>=1.24.0",
+    "opentelemetry-exporter-prometheus>=0.45b0",
+    "opentelemetry-instrumentation-fastapi>=0.45b0",
+    "structlog>=24.0.0",
+    "prometheus-client>=0.21.0",
+    # Security
+    "cryptography>=42.0.0",
+    # Utilities
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "phonenumbers>=8.13.0",
+    "rapidfuzz>=3.10.0",
+    "num2words>=0.5.14",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-timeout>=2.3.0",
+    "ruff>=0.5.0",
+    "pyright>=1.1.370",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+timeout = 60
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"

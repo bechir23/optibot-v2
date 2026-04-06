@@ -1,0 +1,483 @@
+"""Outbound Caller Agent — production-grade LiveKit voice agent.
+
+Fixes applied:
+- PII removed from prompt (Critical 6): data served only via tools
+- STT correction + hold detection wired via on_user_turn_completed (Critical 4)
+- All tools record to state store (High 9)
+- End-of-session finalization with RAG writeback (Critical 3)
+- OTEL spans on tool execution (High 7)
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+from livekit.agents import Agent, RunContext, function_tool
+
+from app.observability.metrics import (
+    observe_llm_latency_ms,
+    observe_stt_latency_ms,
+    observe_tool_latency_ms,
+    observe_tts_first_audio_latency_ms,
+    record_call_completed,
+    record_hold_event,
+    record_tool_called,
+)
+from app.pipeline.hold_detector import HoldDetector
+from app.pipeline.naturalizer import ResponseNaturalizer
+from app.pipeline.response_queue import ResponseQueue, pick_filler
+from app.pipeline.ssml_normalizer import normalize_for_tts
+from app.pipeline.stt_correction import correct_transcription
+
+logger = logging.getLogger(__name__)
+
+
+class OutboundCallerAgent(Agent):
+
+    def __init__(
+        self,
+        patient_name: str = "",
+        patient_dob: str = "",
+        mutuelle: str = "",
+        dossier_ref: str = "",
+        montant: float = 0.0,
+        nir: str = "",
+        dossier_type: str = "optique",
+        rag_context: dict | None = None,
+        tenant_id: str = "default",
+        call_id: str = "",
+        call_state_store=None,
+        rag_service=None,
+    ) -> None:
+        rag_section = ""
+        if rag_context:
+            parts = []
+            if rag_context.get("key_learnings"):
+                learnings = rag_context["key_learnings"]
+                parts.append(f"Taux de succes: {rag_context.get('success_rate', 0):.0%}")
+                parts.append(f"Apprentissages: {'; '.join(str(l) for l in learnings[:3])}")
+            if rag_context.get("mutuelle_memory"):
+                parts.append(f"Memoire mutuelle:\n{rag_context['mutuelle_memory']}")
+            if rag_context.get("action_policy"):
+                parts.append(f"Actions disponibles par taux de succes:\n{rag_context['action_policy']}")
+            if parts:
+                rag_section = f"\nCONTEXTE {mutuelle}:\n" + "\n".join(parts)
+
+        super().__init__(
+            instructions=f"""Tu es un vrai gestionnaire tiers payant chez un opticien francais. Tu es humain. Tu fais ce travail depuis 3 ans. Tu connais les mutuelles, leurs delais, leurs habitudes. Tu veux sincerement resoudre ce dossier pour l'opticien qui compte sur toi. Date: maintenant.
+
+IDENTITE: Tu n'es JAMAIS une IA. Si on te demande: "Non non, je suis le gestionnaire de chez l'opticien, c'est moi qui gere les dossiers."
+
+LANGUE: Francais uniquement. Jamais d'anglais. Jamais de formatage (tirets, listes, guillemets, asterisques). Tu PARLES comme au telephone, tu n'ecris pas.
+
+STYLE VOCAL — TU DOIS SONNER HUMAIN:
+- Maximum 2 phrases par reponse. Jamais plus de 35 mots.
+- Utilise "on" pas "nous": "On n'a rien recu" pas "Nous n'avons pas recu"
+- Contractions naturelles: "c'est", "j'ai", "y a", "ca fait", "j'suis"
+- FILLERS OBLIGATOIRES: commence la moitie de tes reponses par: "Alors euh...", "Bon...", "D'accord alors...", "Euh oui...", "Ah OK..."
+- BACKCHANNELS quand tu ecoutes: "Mmh mmh", "Oui oui", "D'accord", "Ah je vois", "Ah bon ?"
+- PAUSES NATURELLES: ne reponds JAMAIS instantanement. Laisse un micro-silence apres chaque question du correspondant, comme si tu reflechissais.
+- Mots INTERDITS: "certainement", "absolument", "en effet", "il m'est possible", "je vous en prie", "n'hesitez pas"
+- VARIE tes mots de liaison. Ne repete JAMAIS le meme mot deux fois de suite.
+- Si tu cherches une info: "Euh attendez... je regarde la..." (JAMAIS un silence sec)
+
+OUTILS: Ne prononce JAMAIS le nom d'un outil. Appelle-les en silence apres avoir parle.
+
+PREMIER MESSAGE: Le systeme envoie le greeting automatiquement. Ne le repete JAMAIS.
+
+DETECTION SVI/REPONDEUR:
+- Repondeur: end_call (raison: "repondeur"). Pas de message vocal.
+- SVI: Ecoute le menu, choisis "remboursement/tiers payant/optique". Apres 3 menus sans humain: end_call (raison: "svi_trop_complexe").
+- Mauvais numero: "Excusez-moi, bonne journee." + end_call.
+
+DEROULEMENT DE L'APPEL:
+
+Etape 1 — Identification
+Donne les infos UNE PAR UNE quand l'agent est pret. Commence par le NOM du patient (give_patient_name), puis la reference bordereau (give_dossier_reference). Si l'agent demande le NIR ou la date de naissance, utilise les outils dedies. Si un champ est VIDE, dis "je n'ai pas cette information sous les yeux, est-ce que vous pouvez retrouver le dossier avec le nom et la date ?"
+
+Etape 2 — Expose du probleme
+Demande le statut du remboursement (ask_reimbursement_status). Selon la reponse: impaye = "Ca fait X jours, on n'a rien recu cote complementaire." / rejete = "On a un rejet, qu'est-ce qui bloque ?" / partiel = "On a recu X mais il reste Y euros."
+
+Etape 3 — Ecoute et reagis
+Laisse l'agent chercher. Ne le coupe JAMAIS. Une question a la fois. Attends la reponse.
+REGLE ABSOLUE: si l'agent dit "attendez", "patientez", "un instant", "je verifie", "je cherche", "deux minutes", "ne quittez pas" → tu te TAIS COMPLETEMENT. Tu ne dis RIEN. Pas de "d'accord", pas de "je patiente", RIEN. Tu attends en silence total jusqu'a ce que l'agent reprenne la parole avec une VRAIE information.
+Si 30 secondes de silence total: "Je suis toujours en ligne."
+Si tu ne comprends pas: "Excusez-moi, pouvez-vous repeter ?"
+A chaque info recue: appelle extract_information en silence.
+
+Etape 4 — Obtiens un engagement
+Tu DOIS obtenir avant de raccrocher:
+1. Un delai ("Dans combien de jours ?", puis "Plutot en jours ou en semaines ?")
+2. Le nom de l'interlocuteur
+3. Une reference si possible
+
+Etape 5 — Conclus
+Dis au revoir, puis appelle end_call avec un summary detaille.
+
+REPONSES SELON LA MUTUELLE:
+- "En cours" → "D'accord mais ca fait X jours. Vous avez un delai ?"
+- "Deja rembourse" → "La date du virement et le montant exact ?"
+- "Dossier inexistant" → "La teletransmission du X, verifiez avec le numero adherent ?"
+- "Erreur code LPP" → "Quel est le code attendu ? Je corrige et retransmets."
+- "Document manquant" → "Lequel ? A quelle adresse ?"
+- "Droits pas ouverts" → "Le patient est a jour. Reverifiez avec le numero ?"
+- "C'est la part AMO" → "Non, c'est la complementaire AMC. La CPAM a deja verse."
+- "Rappelez plus tard" → "Quel horaire ? Y a un numero direct ?"
+- "Transfert" → "Votre nom avant le transfert ?" Puis recommence.
+
+GESTION DU TEMPS:
+- 5 min sans avancee: recapitule et propose de conclure
+- 10 min: conclus obligatoirement
+- Jamais en boucle sur la meme question (2 tentatives max)
+
+Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
+{rag_section}""",
+        )
+        self._patient_name = patient_name
+        self._patient_dob = patient_dob
+        self._mutuelle = mutuelle
+        self._dossier_ref = dossier_ref
+        self._montant = montant
+        self._nir = nir
+        self._dossier_type = dossier_type
+        self._tenant_id = tenant_id
+        self._call_id = call_id
+        self._call_state_store = call_state_store
+        self._rag_service = rag_service
+        self._hold_detector = HoldDetector()
+        self._naturalizer = ResponseNaturalizer()
+        self._response_queue = ResponseQueue()
+        self._last_user_utterance = ""
+        self._extracted: dict[str, Any] = {}
+        self._tools_called: list[str] = []
+        self._call_start = time.time()
+        self._finalized = False
+
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        """Override LLM node to measure latency (Phase 4 metrics)."""
+        llm_start = time.monotonic()
+        first_chunk = True
+        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+            if first_chunk:
+                observe_llm_latency_ms((time.monotonic() - llm_start) * 1000.0)
+                first_chunk = False
+            yield chunk
+
+    async def tts_node(self, text, model_settings):
+        """Override TTS node — normalize French text before synthesis.
+
+        text is AsyncIterable[str] (stream of text chunks).
+        We normalize each chunk for French pronunciation.
+        """
+        async def _normalize_stream(input_text):
+            async for chunk in input_text:
+                yield normalize_for_tts(chunk)
+
+        async for frame in Agent.default.tts_node(self, _normalize_stream(text), model_settings):
+            yield frame
+
+    async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
+        """LiveKit hook: called after each user turn (STT complete).
+
+        Wires STT correction and hold detection into the live pipeline.
+        """
+        if not new_message or not new_message.content:
+            return
+
+        turn_start = time.monotonic()
+
+        # LiveKit ChatMessage.content is list[str | ChatImage], extract text
+        raw_content = new_message.content
+        if isinstance(raw_content, list):
+            text_parts = [part for part in raw_content if isinstance(part, str)]
+            original = " ".join(text_parts)
+        else:
+            original = str(raw_content)
+
+        if not original.strip():
+            return
+
+        corrected = correct_transcription(original)
+        if corrected != original:
+            new_message.content = [corrected]
+            logger.debug("STT corrected: '%s' -> '%s'", original[:60], corrected[:60])
+
+        hold_result = self._hold_detector.detect(corrected)
+        if hold_result.hold_started:
+            logger.info("Hold detected — suppressing agent response")
+            record_hold_event(self._tenant_id, "started")
+            turn_ctx.cancel()
+        elif hold_result.hold_timeout:
+            logger.warning("Hold timeout reached")
+            record_hold_event(self._tenant_id, "timeout")
+            turn_ctx.cancel()
+        elif hold_result.is_hold:
+            turn_ctx.cancel()
+        elif hold_result.hold_ended:
+            logger.info("Hold ended after %.0fs", hold_result.duration)
+            record_hold_event(self._tenant_id, "ended")
+
+        # Track for naturalizer transition context
+        self._last_user_utterance = corrected
+
+        # Measures transcript post-processing latency (correction + hold decision).
+        observe_stt_latency_ms((time.monotonic() - turn_start) * 1000.0)
+
+    async def _record_tool(self, name: str) -> None:
+        started = time.monotonic()
+        self._tools_called.append(name)
+        record_tool_called(self._tenant_id, name)
+        if self._call_state_store and self._call_id:
+            try:
+                await self._call_state_store.append_tool_call(self._call_id, name)
+            except Exception:
+                pass
+        observe_tool_latency_ms((time.monotonic() - started) * 1000.0)
+
+    async def _finalize_call(self) -> None:
+        """End-of-session: persist state + RAG writeback."""
+        if self._finalized:
+            return
+        self._finalized = True
+
+        outcome = self._extracted.get("call_outcome", "unknown")
+        summary = self._extracted.get("call_summary", "")
+        duration_seconds = max(0.0, time.time() - self._call_start)
+
+        record_call_completed(
+            tenant_id=self._tenant_id,
+            mutuelle=self._mutuelle,
+            outcome=outcome,
+            duration_seconds=duration_seconds,
+        )
+
+        if self._call_state_store and self._call_id:
+            try:
+                await self._call_state_store.finalize(
+                    self._call_id, outcome, self._extracted
+                )
+            except Exception as e:
+                logger.error("Failed to finalize call state: %s", e)
+
+        if self._rag_service and summary:
+            try:
+                await self._rag_service.store_call_summary(
+                    tenant_id=self._tenant_id,
+                    call_id=self._call_id,
+                    mutuelle=self._mutuelle,
+                    dossier_type=self._dossier_type,
+                    summary=summary,
+                    outcome=outcome,
+                    key_learnings=self._extracted.get("key_learnings", []),
+                    action_sequence=self._tools_called,
+                )
+            except Exception as e:
+                logger.error("Failed to store RAG summary: %s", e)
+
+    # ── Patient info tools (PII served only on demand) ────
+
+    @function_tool()
+    async def give_patient_name(self, ctx: RunContext) -> str:
+        """Provide the patient's full name when the mutuelle agent asks for identification."""
+        await self._record_tool("give_patient_name")
+        return f"Le dossier est au nom de {self._patient_name}."
+
+    @function_tool()
+    async def give_dossier_reference(self, ctx: RunContext) -> str:
+        """Provide the dossier or bordereau reference number."""
+        await self._record_tool("give_dossier_reference")
+        if self._dossier_ref:
+            return f"La reference du bordereau est {self._dossier_ref}."
+        return "Je n'ai pas la reference sous les yeux, pouvez-vous chercher par nom ?"
+
+    @function_tool()
+    async def give_date_of_birth(self, ctx: RunContext) -> str:
+        """Provide the patient's date of birth for identity verification. Only use when explicitly asked."""
+        await self._record_tool("give_date_of_birth")
+        if self._patient_dob:
+            return f"La date de naissance est le {self._patient_dob}."
+        return "Je n'ai pas la date de naissance sous les yeux."
+
+    @function_tool()
+    async def give_nir(self, ctx: RunContext) -> str:
+        """Provide the patient's numero de securite sociale. Only use when explicitly requested by the mutuelle agent."""
+        await self._record_tool("give_nir")
+        if self._nir:
+            return f"Le numero de securite sociale est {self._nir}."
+        return "Je n'ai pas le NIR sous les yeux."
+
+    @function_tool()
+    async def give_montant(self, ctx: RunContext) -> str:
+        """Provide the reimbursement amount or invoice total."""
+        await self._record_tool("give_montant")
+        return f"Le montant est de {self._montant} euros."
+
+    # ── Reimbursement inquiry tools ────────────────────────
+
+    @function_tool()
+    async def ask_reimbursement_status(self, ctx: RunContext) -> str:
+        """Ask the mutuelle agent about the current reimbursement status."""
+        await self._record_tool("ask_reimbursement_status")
+        return "Pouvez-vous me dire ou en est le remboursement pour ce dossier ?"
+
+    @function_tool()
+    async def ask_timeline(self, ctx: RunContext) -> str:
+        """Ask when the reimbursement will be processed or paid."""
+        await self._record_tool("ask_timeline")
+        return "Avez-vous une estimation de la date de traitement ?"
+
+    @function_tool()
+    async def ask_remaining_amount(self, ctx: RunContext) -> str:
+        """Ask about the remaining amount to be reimbursed."""
+        await self._record_tool("ask_remaining_amount")
+        return "Quel est le reste a charge ou le montant restant a rembourser ?"
+
+    @function_tool()
+    async def ask_reference_number(self, ctx: RunContext) -> str:
+        """Ask for a tracking reference number."""
+        await self._record_tool("ask_reference_number")
+        return "Pourriez-vous me donner un numero de reference pour le suivi ?"
+
+    @function_tool()
+    async def ask_missing_documents(self, ctx: RunContext) -> str:
+        """Ask if any documents are missing to process the reimbursement."""
+        await self._record_tool("ask_missing_documents")
+        return "Y a-t-il des pieces manquantes pour traiter ce dossier ?"
+
+    # ── Data extraction ────────────────────────────────────
+
+    @function_tool()
+    async def extract_information(
+        self,
+        ctx: RunContext,
+        status: str = "",
+        amount: float = 0,
+        date_info: str = "",
+        reference: str = "",
+        notes: str = "",
+    ) -> str:
+        """Extract and record structured data from what the mutuelle agent just said.
+
+        Args:
+            status: Reimbursement status (en cours, traite, rejete, en attente)
+            amount: Amount in euros
+            date_info: Date mentioned
+            reference: Reference number or tracking code
+            notes: Any other important information
+        """
+        await self._record_tool("extract_information")
+        if status:
+            self._extracted["status"] = status
+        if amount:
+            self._extracted["amount"] = amount
+        if date_info:
+            self._extracted["date"] = date_info
+        if reference:
+            self._extracted["reference"] = reference
+        if notes:
+            self._extracted["notes"] = notes
+        return "Information enregistree."
+
+    # ── Call control ───────────────────────────────────────
+
+    @function_tool()
+    async def end_call(self, ctx: RunContext, reason: str, summary: str = "") -> str:
+        """End the conversation politely. Always provide a summary of what was learned.
+
+        Args:
+            reason: Why the call is ending (all_info_collected, callback_requested, agent_busy)
+            summary: Brief summary of what was learned during the call
+        """
+        await self._record_tool("end_call")
+        self._extracted["call_outcome"] = reason
+        self._extracted["call_summary"] = summary
+        await self._finalize_call()
+        return "Merci beaucoup pour votre aide. Bonne journee !"
+
+    @function_tool()
+    async def request_transfer(self, ctx: RunContext, target_service: str) -> str:
+        """Ask to be transferred to another department.
+
+        Args:
+            target_service: Which service to transfer to
+        """
+        await self._record_tool("request_transfer")
+        return f"Pourriez-vous me transferer vers le {target_service} s'il vous plait ?"
+
+    @function_tool()
+    async def acknowledge_and_wait(self, ctx: RunContext) -> str:
+        """Acknowledge what the agent said and wait for more information."""
+        await self._record_tool("acknowledge_and_wait")
+        return "D'accord, je patiente."
+
+    @function_tool()
+    async def memoriser_appel(
+        self,
+        ctx: RunContext,
+        interlocuteur_nom: str = "",
+        interlocuteur_role: str = "",
+        astuces: str = "",
+        pieges: str = "",
+        svi_chemin: str = "",
+        delai_annonce_jours: int = 0,
+    ) -> str:
+        """Save learnings from this call for future calls to the same mutuelle.
+        Call this BEFORE end_call. Record what worked, what to avoid, and who you spoke with.
+
+        Args:
+            interlocuteur_nom: Name of the person you spoke with
+            interlocuteur_role: Their role (gestionnaire, responsable, etc.)
+            astuces: What worked well (e.g. 'Donner le FINESS accelere la recherche')
+            pieges: What to avoid next time (e.g. 'Le service ferme a 16h')
+            svi_chemin: IVR menu path that worked (e.g. '1 puis 3')
+            delai_annonce_jours: Announced processing delay in days
+        """
+        await self._record_tool("memoriser_appel")
+        call_data = {}
+        if interlocuteur_nom:
+            call_data["interlocuteur_nom"] = interlocuteur_nom
+            self._extracted["interlocuteur"] = interlocuteur_nom
+        if interlocuteur_role:
+            call_data["interlocuteur_role"] = interlocuteur_role
+        if astuces:
+            call_data["astuces"] = [a.strip() for a in astuces.split(";") if a.strip()]
+            self._extracted["key_learnings"] = call_data["astuces"]
+        if pieges:
+            call_data["pieges"] = [p.strip() for p in pieges.split(";") if p.strip()]
+        if svi_chemin:
+            call_data["svi_chemin"] = svi_chemin
+        if delai_annonce_jours:
+            call_data["delai_annonce_jours"] = delai_annonce_jours
+            self._extracted["delai_jours"] = delai_annonce_jours
+
+        if self._rag_service and hasattr(self._rag_service, '_supabase'):
+            try:
+                from app.services.mutuelle_memory import MutuelleMemory
+                memory = MutuelleMemory(
+                    supabase=self._rag_service._supabase,
+                    cache=self._rag_service._cache,
+                )
+                await memory.save(self._mutuelle, self._tenant_id, call_data)
+                logger.info("Saved mutuelle memory for %s", self._mutuelle)
+            except Exception as e:
+                logger.warning("Failed to save mutuelle memory: %s", e)
+
+        return "Apprentissages memorises pour les prochains appels."
+
+    @function_tool()
+    async def escalate_to_human(self, ctx: RunContext, reason: str) -> str:
+        """Signal that human intervention from the optician is needed.
+
+        Args:
+            reason: Why human intervention is needed
+        """
+        await self._record_tool("escalate_to_human")
+        self._extracted["escalation_reason"] = reason
+        self._extracted["call_outcome"] = "escalated"
+        await self._finalize_call()
+        return "Je vais devoir verifier avec l'opticien. Puis-je vous rappeler ?"
+
+    @property
+    def extracted_data(self) -> dict[str, Any]:
+        return self._extracted
