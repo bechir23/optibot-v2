@@ -658,11 +658,28 @@ async def outbound_session(ctx):
         llm=llm_model,
         tts=tts_model,
         vad=_get_shared_vad_model(),
-        # STT-based turn detection: Deepgram handles endpointing natively.
-        # min_endpointing_delay=0 avoids additive delay on top of Deepgram's
-        # own endpointing (LiveKit #4325: STT mode adds delay, not overlaps).
-        turn_detection="stt",
-        min_endpointing_delay=0,
+        turn_handling={
+            "turn_detection": "stt",
+            "endpointing": {
+                "mode": "dynamic",   # adapts to conversation rhythm
+                "min_delay": 0.0,    # Deepgram handles endpointing (LiveKit #4325)
+                "max_delay": 3.0,    # cap for slow speakers
+            },
+            "interruption": {
+                "enabled": True,
+                "mode": "adaptive",  # context-aware barge-in detection
+                "resume_false_interruption": True,  # resume after false interrupt
+                "false_interruption_timeout": 1.5,
+                "min_words": 2,      # require 2+ words to interrupt
+            },
+        },
+        # Disable user_away_timeout — we have custom HoldDetector;
+        # default 15s triggers false "away" during hold (docs gap)
+        user_away_timeout=None,
+        # Default max_tool_steps=3 is too low for 15+ tools;
+        # agent may need: give_patient_name -> give_dossier_reference ->
+        # ask_reimbursement_status -> extract_information in sequence
+        max_tool_steps=8,
         preemptive_generation=True,
     )
 
@@ -942,8 +959,23 @@ async def inbound_session(ctx):
         llm=llm_model,
         tts=tts_model,
         vad=_get_shared_vad_model(),
-        turn_detection="stt",
-        min_endpointing_delay=0,
+        turn_handling={
+            "turn_detection": "stt",
+            "endpointing": {
+                "mode": "dynamic",
+                "min_delay": 0.0,
+                "max_delay": 3.0,
+            },
+            "interruption": {
+                "enabled": True,
+                "mode": "adaptive",
+                "resume_false_interruption": True,
+                "false_interruption_timeout": 1.5,
+                "min_words": 2,
+            },
+        },
+        user_away_timeout=None,
+        max_tool_steps=8,
         preemptive_generation=True,
     )
 

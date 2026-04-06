@@ -122,18 +122,29 @@ REGLES:
 
     @function_tool()
     async def human_answered(self, ctx: RunContext) -> tuple:
-        """A real human agent has answered. Hand off to conversation agent."""
+        """A real human agent has answered. Hand off to conversation agent.
+
+        LiveKit framework preserves chat_ctx across handoffs automatically
+        (session.update_agent inserts AgentHandoff item into shared context).
+        We additionally pass IVR navigation summary in rag_context so the
+        conversation agent knows what path was taken.
+        """
         logger.info("IVR: Human detected after path %s — handoff", self._svi_path)
 
         from app.agents.outbound_caller import OutboundCallerAgent
 
         kwargs = dict(self._caller_agent_kwargs)
-        # Handoff preserves runtime chat context internally; constructor kwargs must stay explicit.
         kwargs.pop("chat_ctx", None)
+
+        # Pass IVR navigation context to conversation agent
+        if "rag_context" not in kwargs:
+            kwargs["rag_context"] = {}
         if self._svi_path:
-            if "rag_context" not in kwargs:
-                kwargs["rag_context"] = {}
-            kwargs.setdefault("rag_context", {})["svi_path_used"] = " > ".join(self._svi_path)
+            kwargs["rag_context"]["svi_path_used"] = " > ".join(self._svi_path)
+        kwargs["rag_context"]["ivr_summary"] = (
+            f"Navigation SVI terminee. Touches appuyees: {', '.join(self._svi_path) or 'aucune'}. "
+            f"Tentatives: {self._attempts}/{self._max_attempts}. Un humain a repondu."
+        )
 
         self._handoff_agent = OutboundCallerAgent(**kwargs)
         return self._handoff_agent, "Humain detecte, passage en mode conversation."
