@@ -690,7 +690,12 @@ async def outbound_session(ctx):
             session.start(
                 agent=agent,
                 room=ctx.room,
-                room_output_options=room_io.RoomOutputOptions(transcription_enabled=True),
+                room_output_options=room_io.RoomOutputOptions(
+                    transcription_enabled=True,
+                    # Use 24kHz for higher quality TTS output;
+                    # helps reduce artifacts during SIP transcoding (LiveKit SIP #608)
+                    audio_sample_rate=24000,
+                ),
                 room_options=room_io.RoomOptions(
                     audio_input=room_io.AudioInputOptions(
                         noise_cancellation=_nc_selector,
@@ -982,7 +987,10 @@ async def inbound_session(ctx):
     await session.start(
         room=ctx.room,
         agent=agent,
-        room_output_options=room_io.RoomOutputOptions(transcription_enabled=True),
+        room_output_options=room_io.RoomOutputOptions(
+            transcription_enabled=True,
+            audio_sample_rate=24000,
+        ),
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=_nc_selector,
