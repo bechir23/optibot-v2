@@ -658,9 +658,11 @@ async def outbound_session(ctx):
         llm=llm_model,
         tts=tts_model,
         vad=_get_shared_vad_model(),
-        # STT-based turn detection: uses Deepgram's phrase endpointing
-        # for semantic-aware turn boundaries (better for French than VAD-only)
+        # STT-based turn detection: Deepgram handles endpointing natively.
+        # min_endpointing_delay=0 avoids additive delay on top of Deepgram's
+        # own endpointing (LiveKit #4325: STT mode adds delay, not overlaps).
         turn_detection="stt",
+        min_endpointing_delay=0,
         preemptive_generation=True,
     )
 
@@ -940,6 +942,8 @@ async def inbound_session(ctx):
         llm=llm_model,
         tts=tts_model,
         vad=_get_shared_vad_model(),
+        turn_detection="stt",
+        min_endpointing_delay=0,
         preemptive_generation=True,
     )
 
