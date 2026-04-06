@@ -9,6 +9,7 @@ Fixes applied:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -131,11 +132,60 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         self._call_start = time.time()
         self._finalized = False
 
+    # Filler phrases for LLM soft timeout — rotated to avoid repetition.
+    # Microsoft call-center-ai pattern: play filler after 3s, abort after 15s.
+    _LLM_FILLERS = [
+        "Un instant...",
+        "Je reflechis...",
+        "Attendez, je verifie...",
+        "Laissez-moi verifier...",
+    ]
+    _LLM_SOFT_TIMEOUT_SEC = 3.0
+    _filler_index = 0
+
     async def llm_node(self, chat_ctx, tools, model_settings):
-        """Override LLM node to measure latency (Phase 4 metrics)."""
+        """Override LLM node: measure latency + soft timeout with filler.
+
+        Pattern from Microsoft call-center-ai: if LLM doesn't produce first
+        chunk within 3 seconds, yield a filler phrase so the caller doesn't
+        hear dead air and hang up. Research shows drop-off climbs sharply
+        beyond 3 seconds of silence.
+
+        Sources:
+        - https://github.com/microsoft/call-center-ai (soft/hard timeout)
+        - https://getbluejay.ai/resources/voice-agent-production-failures
+        """
         llm_start = time.monotonic()
         first_chunk = True
-        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+        filler_sent = False
+
+        # Create an async iterator from the default llm_node
+        llm_iter = Agent.default.llm_node(self, chat_ctx, tools, model_settings).__aiter__()
+
+        while True:
+            try:
+                if first_chunk and not filler_sent:
+                    # Wait up to soft timeout for first chunk
+                    chunk = await asyncio.wait_for(
+                        llm_iter.__anext__(),
+                        timeout=self._LLM_SOFT_TIMEOUT_SEC,
+                    )
+                else:
+                    chunk = await llm_iter.__anext__()
+            except asyncio.TimeoutError:
+                # LLM too slow — yield filler to prevent dead air
+                filler = self._LLM_FILLERS[self._filler_index % len(self._LLM_FILLERS)]
+                self._filler_index += 1
+                logger.warning(
+                    "LLM soft timeout (%.1fs) — sending filler: %s",
+                    self._LLM_SOFT_TIMEOUT_SEC, filler,
+                )
+                yield filler
+                filler_sent = True
+                continue
+            except StopAsyncIteration:
+                break
+
             if first_chunk:
                 observe_llm_latency_ms((time.monotonic() - llm_start) * 1000.0)
                 first_chunk = False
