@@ -35,7 +35,21 @@ class AnsweredBy(StrEnum):
 
 @dataclass
 class AMDConfig:
-    """Tuning parameters — Twilio AMD defaults with OptiBot adjustments."""
+    """Tuning parameters for French telephony AMD.
+
+    French-specific adjustments (vs Twilio English defaults):
+    - human_speech_max_ms raised from 1500 to 2000: French call center agents
+      answer with longer greetings ("Allô bonjour, service remboursements,
+      j'écoute") than English "Hello?" (~800ms). 2000ms covers typical French
+      human greetings without overlapping voicemail (which runs 4-8s).
+    - speech_threshold_ms kept at 2400: French voicemail greetings
+      ("Vous êtes bien sur le répondeur de...") run 4-8 seconds, well above.
+
+    Sources:
+    - Twilio AMD best practices: MachineDetectionSpeechThreshold
+    - Daily.co voicemail detection agent pattern
+    - Reddit: 34% of outbound calls hit voicemail; French greeting patterns differ
+    """
     # Max time to wait for detection result
     detection_timeout_sec: float = 30.0
     # Speech longer than this = likely machine/voicemail greeting
@@ -44,8 +58,8 @@ class AMDConfig:
     speech_end_threshold_ms: float = 1200.0
     # Initial silence longer than this = unknown/dead line
     silence_timeout_ms: float = 5000.0
-    # Very short speech = likely human "allo?"
-    human_speech_max_ms: float = 1500.0
+    # Very short speech = likely human (French "allô" ~800ms, full greeting ~2s)
+    human_speech_max_ms: float = 2000.0
 
 
 @dataclass

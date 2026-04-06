@@ -31,6 +31,15 @@ class TestHumanDetection:
         r = amd.get_result()
         assert r.answered_by == AnsweredBy.HUMAN
 
+    def test_french_full_greeting_is_human(self):
+        """French agent: 'Allo bonjour, service remboursements, j'ecoute' ~1.8s = human."""
+        amd = AnsweringMachineDetector()
+        amd.on_speech_start()
+        amd.on_speech_end(1800)
+        r = amd.get_result()
+        assert r.answered_by == AnsweredBy.HUMAN
+        assert r.confidence >= 0.7
+
 
 class TestMachineDetection:
     def test_long_speech_is_machine(self):
@@ -44,7 +53,7 @@ class TestMachineDetection:
 
     def test_custom_threshold(self):
         """Custom threshold for shorter voicemail greetings."""
-        cfg = AMDConfig(speech_threshold_ms=1500.0)
+        cfg = AMDConfig(speech_threshold_ms=1500.0, human_speech_max_ms=1400.0)
         amd = AnsweringMachineDetector(config=cfg)
         amd.on_speech_start()
         amd.on_speech_end(1600)
