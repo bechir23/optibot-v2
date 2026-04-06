@@ -25,9 +25,6 @@ from app.observability.metrics import (
     record_tool_called,
 )
 from app.pipeline.hold_detector import HoldDetector
-from app.pipeline.naturalizer import ResponseNaturalizer
-from app.pipeline.response_queue import ResponseQueue, pick_filler
-from app.pipeline.ssml_normalizer import normalize_for_tts
 from app.pipeline.stt_correction import correct_transcription
 
 logger = logging.getLogger(__name__)
@@ -146,8 +143,6 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         self._call_state_store = call_state_store
         self._rag_service = rag_service
         self._hold_detector = HoldDetector()
-        self._naturalizer = ResponseNaturalizer()
-        self._response_queue = ResponseQueue()
         self._last_user_utterance = ""
         self._extracted: dict[str, Any] = {}
         self._tools_called: list[str] = []
@@ -163,19 +158,6 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
                 observe_llm_latency_ms((time.monotonic() - llm_start) * 1000.0)
                 first_chunk = False
             yield chunk
-
-    async def tts_node(self, text, model_settings):
-        """Override TTS node — normalize French text before synthesis.
-
-        text is AsyncIterable[str] (stream of text chunks).
-        We normalize each chunk for French pronunciation.
-        """
-        async def _normalize_stream(input_text):
-            async for chunk in input_text:
-                yield normalize_for_tts(chunk)
-
-        async for frame in Agent.default.tts_node(self, _normalize_stream(text), model_settings):
-            yield frame
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         """LiveKit hook: called after each user turn (STT complete).

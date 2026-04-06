@@ -597,7 +597,7 @@ async def outbound_session(ctx):
             return noise_cancellation.BVCTelephony()
         return noise_cancellation.BVC()
 
-    tts_kwargs: dict[str, Any] = {}
+    tts_kwargs: dict[str, Any] = {"language": "fr"}
     if settings.cartesia_voice_id:
         tts_kwargs["voice"] = settings.cartesia_voice_id
 
@@ -647,6 +647,7 @@ async def outbound_session(ctx):
             session.start(
                 agent=agent,
                 room=ctx.room,
+                room_output_options=room_io.RoomOutputOptions(transcription_enabled=True),
                 room_options=room_io.RoomOptions(
                     audio_input=room_io.AudioInputOptions(
                         noise_cancellation=_nc_selector,
@@ -750,11 +751,20 @@ async def outbound_session(ctx):
                 _amd.on_speech_end(duration_ms)
                 result = _amd.get_result()
                 if result.answered_by == AnsweredBy.MACHINE_START:
-                    logger.warning("AMD: voicemail detected (%.0fms speech)", duration_ms)
+                    logger.warning("AMD: voicemail detected (%.0fms speech) — hanging up", duration_ms)
                     if app_state.call_state:
                         asyncio.create_task(
                             app_state.call_state.mark_phase(ctx.room.name, "voicemail", event="amd:machine")
                         )
+                    # Hang up — don't leave agent running against a voicemail greeting
+                    async def _hangup_voicemail():
+                        try:
+                            await ctx.api.room.delete_room(
+                                api.DeleteRoomRequest(room=ctx.room.name)
+                            )
+                        except Exception as exc:
+                            logger.error("Failed to hangup after voicemail: %s", exc)
+                    asyncio.create_task(_hangup_voicemail())
                 elif result.answered_by == AnsweredBy.HUMAN:
                     logger.info("AMD: human detected (%.0fms speech)", duration_ms)
                     if app_state.call_state:
@@ -862,7 +872,7 @@ async def inbound_session(ctx):
             return noise_cancellation.BVCTelephony()
         return noise_cancellation.BVC()
 
-    tts_kwargs: dict[str, Any] = {}
+    tts_kwargs: dict[str, Any] = {"language": "fr"}
     if settings.cartesia_voice_id:
         tts_kwargs["voice"] = settings.cartesia_voice_id
 
@@ -904,6 +914,7 @@ async def inbound_session(ctx):
     await session.start(
         room=ctx.room,
         agent=agent,
+        room_output_options=room_io.RoomOutputOptions(transcription_enabled=True),
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=_nc_selector,
