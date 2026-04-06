@@ -74,8 +74,8 @@ STYLE VOCAL:
 - Varie tes formulations. Ne repete pas la meme tournure deux fois de suite.
 - Si tu cherches une info: "Attendez, je regarde..." (pas de silence sec).
 
-OUTILS: Ne prononce jamais le nom d'un outil. Appelle-les en silence.
-IMPORTANT — PAS DE SILENCE MORT: Avant d'appeler un outil, dis TOUJOURS un mot bref au correspondant ("D'accord", "Je note", "Un instant"). Ne laisse JAMAIS plus de 2 secondes de silence.
+OUTILS: Ne prononce jamais le nom d'un outil.
+REGLE CRITIQUE: Ne combine JAMAIS parole et appel d'outil dans la meme reponse. Soit tu parles, soit tu appelles un outil, jamais les deux en meme temps. Si tu dois appeler un outil, parle d'abord ("D'accord", "Je note", "Un instant"), attends que le correspondant entende, PUIS appelle l'outil dans ta reponse suivante.
 
 PREMIER MESSAGE: Le systeme envoie le greeting automatiquement. Ne le repete pas.
 
@@ -145,6 +145,10 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         """LiveKit hook: called after each user turn (STT complete).
 
         Wires STT correction and hold detection into the live pipeline.
+
+        Guard: preemptive_generation can fire this callback multiple times
+        with similar transcriptions (LiveKit #3414). We deduplicate by
+        checking if the text matches the last processed utterance.
         """
         if not new_message or not new_message.content:
             return
@@ -160,6 +164,11 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
             original = str(raw_content)
 
         if not original.strip():
+            return
+
+        # Deduplicate: preemptive_generation may fire this multiple times
+        # with identical or near-identical text (LiveKit #3414)
+        if original == self._last_user_utterance:
             return
 
         corrected = correct_transcription(original)
@@ -181,6 +190,14 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         elif hold_result.hold_ended:
             logger.info("Hold ended after %.0fs", hold_result.duration)
             record_hold_event(self._tenant_id, "ended")
+            # Warn if hold was long enough for Cartesia WS to have timed out
+            # (LiveKit #2281: Cartesia websocket closes after ~60s idle)
+            if hold_result.duration > 60:
+                logger.warning(
+                    "Long hold (%.0fs) — Cartesia websocket may have reconnected; "
+                    "first TTS response could have brief delay",
+                    hold_result.duration,
+                )
 
         # Track for naturalizer transition context
         self._last_user_utterance = corrected
