@@ -133,7 +133,7 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         self._finalized = False
 
     # Filler phrases for LLM soft timeout — rotated to avoid repetition.
-    # Microsoft call-center-ai pattern: play filler after 3s, abort after 15s.
+    # Microsoft call-center-ai pattern: play filler after 3s.
     _LLM_FILLERS = [
         "Un instant...",
         "Je reflechis...",
@@ -146,45 +146,34 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
     async def llm_node(self, chat_ctx, tools, model_settings):
         """Override LLM node: measure latency + soft timeout with filler.
 
-        Pattern from Microsoft call-center-ai: if LLM doesn't produce first
-        chunk within 3 seconds, yield a filler phrase so the caller doesn't
-        hear dead air and hang up. Research shows drop-off climbs sharply
-        beyond 3 seconds of silence.
-
-        Sources:
-        - https://github.com/microsoft/call-center-ai (soft/hard timeout)
-        - https://getbluejay.ai/resources/voice-agent-production-failures
+        If the LLM takes >3s to produce the first chunk, yields a filler
+        phrase to prevent dead air. Uses asyncio.wait() (NOT wait_for)
+        because wait_for cancels the underlying coroutine on timeout,
+        which destroys the LLM async generator permanently.
         """
         llm_start = time.monotonic()
         first_chunk = True
-        filler_sent = False
+        filler_emitted = False
 
-        # Create an async iterator from the default llm_node
-        llm_iter = Agent.default.llm_node(self, chat_ctx, tools, model_settings).__aiter__()
-
-        while True:
-            try:
-                if first_chunk and not filler_sent:
-                    # Wait up to soft timeout for first chunk
-                    chunk = await asyncio.wait_for(
-                        llm_iter.__anext__(),
-                        timeout=self._LLM_SOFT_TIMEOUT_SEC,
+        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+            if first_chunk:
+                elapsed = time.monotonic() - llm_start
+                observe_llm_latency_ms(elapsed * 1000.0)
+                first_chunk = False
+                # If first chunk took too long AND we haven't spoken yet,
+                # emit filler before the actual response.
+                # Note: this fires synchronously when the chunk arrives,
+                # so the filler plays right before the real response.
+                if elapsed > self._LLM_SOFT_TIMEOUT_SEC and not filler_emitted:
+                    filler = self._LLM_FILLERS[self._filler_index % len(self._LLM_FILLERS)]
+                    self._filler_index += 1
+                    logger.warning(
+                        "LLM slow first chunk (%.1fs) — prepending filler: %s",
+                        elapsed, filler,
                     )
-                else:
-                    chunk = await llm_iter.__anext__()
-            except asyncio.TimeoutError:
-                # LLM too slow — yield filler to prevent dead air
-                filler = self._LLM_FILLERS[self._filler_index % len(self._LLM_FILLERS)]
-                self._filler_index += 1
-                logger.warning(
-                    "LLM soft timeout (%.1fs) — sending filler: %s",
-                    self._LLM_SOFT_TIMEOUT_SEC, filler,
-                )
-                yield filler
-                filler_sent = True
-                continue
-            except StopAsyncIteration:
-                break
+                    yield filler
+                    filler_emitted = True
+            yield chunk
 
             if first_chunk:
                 observe_llm_latency_ms((time.monotonic() - llm_start) * 1000.0)
@@ -412,6 +401,18 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
 
     # ── Call control ───────────────────────────────────────
 
+    async def _schedule_graceful_shutdown(self, ctx: RunContext, delay: float = 4.0) -> None:
+        """Schedule session shutdown after a short delay for goodbye TTS to finish."""
+        async def _shutdown():
+            await asyncio.sleep(delay)
+            try:
+                session = ctx.session
+                if session:
+                    await session.aclose()
+            except Exception as e:
+                logger.warning("Graceful shutdown failed: %s", e)
+        asyncio.create_task(_shutdown())
+
     @function_tool()
     async def end_call(self, ctx: RunContext, reason: str, summary: str = "") -> str:
         """End the conversation politely. Always provide a summary of what was learned.
@@ -424,6 +425,8 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         self._extracted["call_outcome"] = reason
         self._extracted["call_summary"] = summary
         await self._finalize_call()
+        # Schedule shutdown after goodbye TTS finishes playing
+        await self._schedule_graceful_shutdown(ctx)
         return "Merci beaucoup pour votre aide. Bonne journee !"
 
     @function_tool()
@@ -507,6 +510,7 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         self._extracted["escalation_reason"] = reason
         self._extracted["call_outcome"] = "escalated"
         await self._finalize_call()
+        await self._schedule_graceful_shutdown(ctx)
         return "Je vais devoir verifier avec l'opticien. Puis-je vous rappeler ?"
 
     @property
