@@ -482,17 +482,21 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
             call_data["delai_annonce_jours"] = delai_annonce_jours
             self._extracted["delai_jours"] = delai_annonce_jours
 
+        # Fire-and-forget Supabase write — don't block the voice pipeline.
+        # Microsoft call-center-ai pattern: deferred persistence via async scheduler.
         if self._rag_service and hasattr(self._rag_service, '_supabase'):
-            try:
-                from app.services.mutuelle_memory import MutuelleMemory
-                memory = MutuelleMemory(
-                    supabase=self._rag_service._supabase,
-                    cache=self._rag_service._cache,
-                )
-                await memory.save(self._mutuelle, self._tenant_id, call_data)
-                logger.info("Saved mutuelle memory for %s", self._mutuelle)
-            except Exception as e:
-                logger.warning("Failed to save mutuelle memory: %s", e)
+            async def _save_memory():
+                try:
+                    from app.services.mutuelle_memory import MutuelleMemory
+                    memory = MutuelleMemory(
+                        supabase=self._rag_service._supabase,
+                        cache=self._rag_service._cache,
+                    )
+                    await memory.save(self._mutuelle, self._tenant_id, call_data)
+                    logger.info("Saved mutuelle memory for %s", self._mutuelle)
+                except Exception as e:
+                    logger.warning("Failed to save mutuelle memory: %s", e)
+            asyncio.create_task(_save_memory())
 
         return "Apprentissages memorises pour les prochains appels."
 
