@@ -836,50 +836,50 @@ async def outbound_session(ctx):
         except Exception as e:
             logger.error("Failed to wait for participant in local loopback: %s", e)
 
-    # End-of-session finalization: ensure RAG writeback on all exit paths
-    @ctx.room.on("disconnected")
-    def on_disconnect():
-        async def _finalize_on_disconnect() -> None:
-            nonlocal call_accounted
+    # End-of-session finalization via add_shutdown_callback.
+    # More reliable than room.on("disconnected") which has known issues:
+    #   #1581: not triggered consistently on unexpected process exit
+    #   #4392: not invoked when call is not received or disconnected early
+    async def _finalize_on_shutdown(reason: str = "") -> None:
+        nonlocal call_accounted
+        if call_accounted:
+            return
 
-            if call_accounted:
-                return
+        finalizable_agent = agent
+        if isinstance(agent, IVRNavigatorAgent) and agent.handoff_agent is not None:
+            finalizable_agent = agent.handoff_agent
 
-            finalizable_agent = agent
-            if isinstance(agent, IVRNavigatorAgent) and agent.handoff_agent is not None:
-                finalizable_agent = agent.handoff_agent
-
-            if isinstance(finalizable_agent, OutboundCallerAgent):
-                extracted = finalizable_agent.extracted_data
-                if not extracted.get("call_outcome"):
-                    extracted["call_outcome"] = "disconnected"
-                try:
-                    await finalizable_agent._finalize_call()
-                except Exception as e:
-                    logger.exception("Call finalization failed on disconnect: %s", e)
-                    record_call_failed(
-                        tenant_id=tenant_id,
-                        mutuelle=mutuelle,
-                        reason="disconnect_finalize_error",
-                    )
-                    if app_state.call_state:
-                        await app_state.call_state.mark_error(ctx.room.name, f"disconnect_finalize:{e}")
-            else:
+        if isinstance(finalizable_agent, OutboundCallerAgent):
+            extracted = finalizable_agent.extracted_data
+            if not extracted.get("call_outcome"):
+                extracted["call_outcome"] = reason or "disconnected"
+            try:
+                await finalizable_agent._finalize_call()
+            except Exception as e:
+                logger.exception("Call finalization failed on shutdown: %s", e)
                 record_call_failed(
                     tenant_id=tenant_id,
                     mutuelle=mutuelle,
-                    reason="disconnected_before_handoff",
+                    reason="shutdown_finalize_error",
                 )
                 if app_state.call_state:
-                    await app_state.call_state.mark_phase(
-                        ctx.room.name,
-                        "completed",
-                        event="disconnected_before_handoff",
-                    )
+                    await app_state.call_state.mark_error(ctx.room.name, f"shutdown_finalize:{e}")
+        else:
+            record_call_failed(
+                tenant_id=tenant_id,
+                mutuelle=mutuelle,
+                reason="disconnected_before_handoff",
+            )
+            if app_state.call_state:
+                await app_state.call_state.mark_phase(
+                    ctx.room.name,
+                    "completed",
+                    event="disconnected_before_handoff",
+                )
 
-            call_accounted = True
+        call_accounted = True
 
-        asyncio.create_task(_finalize_on_disconnect())
+    ctx.add_shutdown_callback(_finalize_on_shutdown)
 
 
 async def inbound_session(ctx):
@@ -1025,17 +1025,15 @@ async def inbound_session(ctx):
     except Exception as e:
         logger.error("Failed to wait for participant on inbound: %s", e)
 
-    @ctx.room.on("disconnected")
-    def on_disconnect():
-        async def _finalize_on_disconnect() -> None:
-            if not agent.extracted_data.get("call_outcome"):
-                agent._extracted["call_outcome"] = "inbound_disconnected"
-            try:
-                await agent._finalize_call()
-            except Exception as e:
-                logger.exception("Inbound finalization failed: %s", e)
+    async def _finalize_inbound_on_shutdown(reason: str = "") -> None:
+        if not agent.extracted_data.get("call_outcome"):
+            agent._extracted["call_outcome"] = reason or "inbound_disconnected"
+        try:
+            await agent._finalize_call()
+        except Exception as e:
+            logger.exception("Inbound finalization failed: %s", e)
 
-        asyncio.create_task(_finalize_on_disconnect())
+    ctx.add_shutdown_callback(_finalize_inbound_on_shutdown)
 
 
 async def unified_session(ctx):
