@@ -175,11 +175,6 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
                     filler_emitted = True
             yield chunk
 
-            if first_chunk:
-                observe_llm_latency_ms((time.monotonic() - llm_start) * 1000.0)
-                first_chunk = False
-            yield chunk
-
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         """LiveKit hook: called after each user turn (STT complete).
 
@@ -205,12 +200,14 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         if not original.strip():
             return
 
-        # Deduplicate: preemptive_generation may fire this multiple times
-        # with identical or near-identical text (LiveKit #3414)
-        if original == self._last_user_utterance:
-            return
-
         corrected = correct_transcription(original)
+
+        # Deduplicate: preemptive_generation may fire this multiple times
+        # with identical or near-identical text (LiveKit #3414).
+        # Compare against the corrected version since that's what we stored
+        # on the previous turn.
+        if corrected == self._last_user_utterance:
+            return
         if corrected != original:
             new_message.content = [corrected]
             logger.debug("STT corrected: '%s' -> '%s'", original[:60], corrected[:60])

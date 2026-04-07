@@ -820,9 +820,21 @@ async def outbound_session(ctx):
                             app_state.call_state.mark_phase(ctx.room.name, "human_answered", event="amd:human")
                         )
 
-    # For outbound: let mutuelle agent speak first
+    # For outbound to real phone number: let mutuelle agent speak first.
+    # For local loopback (test rooms via Meet UI): wait for the user to
+    # actually join the room, THEN greet. Otherwise the agent speaks to
+    # an empty room before the user connects and the user hears nothing.
     if phone_number is None:
-        await session.generate_reply()
+        try:
+            participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=60.0)
+            logger.info("Local loopback: participant %s joined, generating greeting", participant.identity)
+            await session.generate_reply()
+        except asyncio.TimeoutError:
+            logger.warning("Local loopback: no participant joined within 60s; shutting down")
+            ctx.shutdown()
+            return
+        except Exception as e:
+            logger.error("Failed to wait for participant in local loopback: %s", e)
 
     # End-of-session finalization: ensure RAG writeback on all exit paths
     @ctx.room.on("disconnected")
@@ -998,10 +1010,20 @@ async def inbound_session(ctx):
         ),
     )
 
+    # Inbound: wait for caller to actually be in the room before greeting.
+    # session.start() auto-connects, so ctx.connect() is redundant but
+    # kept for explicit intent.
     await ctx.connect()
-
-    # Inbound: agent greets first
-    await session.generate_reply()
+    try:
+        participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=60.0)
+        logger.info("Inbound: participant %s joined, generating greeting", participant.identity)
+        await session.generate_reply()
+    except asyncio.TimeoutError:
+        logger.warning("Inbound: no caller joined within 60s; shutting down")
+        ctx.shutdown()
+        return
+    except Exception as e:
+        logger.error("Failed to wait for participant on inbound: %s", e)
 
     @ctx.room.on("disconnected")
     def on_disconnect():
