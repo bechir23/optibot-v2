@@ -680,6 +680,10 @@ async def outbound_session(ctx):
         # agent may need: give_patient_name -> give_dossier_reference ->
         # ask_reimbursement_status -> extract_information in sequence
         max_tool_steps=8,
+        # Add a small natural pause between consecutive agent utterances.
+        # Default 0.0 produces rapid-fire responses that sound robotic on
+        # telephony. 300ms matches human conversational pacing.
+        min_consecutive_speech_delay=0.3,
         preemptive_generation=True,
     )
 
@@ -993,6 +997,7 @@ async def inbound_session(ctx):
         },
         user_away_timeout=None,
         max_tool_steps=8,
+        min_consecutive_speech_delay=0.3,
         preemptive_generation=True,
     )
 
