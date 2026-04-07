@@ -6,9 +6,12 @@ valid metrics.
 """
 from __future__ import annotations
 
+import logging
 from enum import StrEnum
 
 from prometheus_client import Counter, Gauge, Histogram
+
+logger = logging.getLogger(__name__)
 
 
 class MetricName(StrEnum):
@@ -275,9 +278,37 @@ def record_call_failed(tenant_id: str, mutuelle: str, reason: str) -> None:
     CALLS_ACTIVE.labels(tenant).dec()
 
 
-def record_hold_event(tenant_id: str, event: str) -> None:
+def record_hold_event(
+    tenant_id: str,
+    event: str,
+    *,
+    call_id: str = "",
+    mutuelle: str = "",
+    reason: str = "",
+    triggering_phrase: str = "",
+    duration: float = 0.0,
+) -> None:
+    """Record a hold lifecycle event with structured context for debugging.
+
+    H3 FIX: prior version only recorded (tenant, event) which made it
+    impossible to debug a false positive in production. Now logs the
+    triggering phrase, hold reason, and duration so operators can trace
+    why a specific call was suppressed.
+
+    triggering_phrase is truncated to 80 chars (PII-safe — no NIR/dossier).
+    """
     tenant = _safe_label(tenant_id)
     HOLD_EVENTS.labels(tenant, _safe_label(event)).inc()
+    if call_id or mutuelle or reason or triggering_phrase:
+        logger.info(
+            "hold_event event=%s call_id=%s mutuelle=%s reason=%s duration=%.1f triggering_phrase=%r",
+            event,
+            call_id or "-",
+            mutuelle or "-",
+            reason or "-",
+            duration,
+            (triggering_phrase or "")[:80],
+        )
 
 
 def record_tool_called(tenant_id: str, tool_name: str) -> None:

@@ -209,6 +209,9 @@ class OutboundCallerAgent(Agent):
         self._rag_service = rag_service
         self._call_mode = call_mode
         self._hold_detector = HoldDetector()
+        # L2 FIX: explicit reset on init so reused agent instances don't
+        # leak hold state across calls.
+        self._hold_detector.reset()
         self._last_user_utterance = ""
         self._extracted: dict[str, Any] = {}
         self._tools_called: list[str] = []
@@ -278,22 +281,67 @@ class OutboundCallerAgent(Agent):
             logger.debug("STT corrected: '%s' -> '%s'", original[:60], corrected[:60])
 
         hold_result = self._hold_detector.detect(corrected)
+
+        # NEW: cold transfer — different interlocuteur incoming.
+        # Don't suppress; just log and clear stale interlocuteur context.
+        if hold_result.cold_transfer_detected:
+            logger.info("Cold transfer detected — clearing interlocuteur context")
+            self._extracted.pop("interlocuteur", None)
+            record_hold_event(
+                self._tenant_id, "cold_transfer",
+                call_id=self._call_id, mutuelle=self._mutuelle,
+                reason=hold_result.reason,
+                triggering_phrase=hold_result.triggering_phrase,
+            )
+
+        # NEW: voicemail-dump pattern — Harmonie disconnects after long wait.
+        # Mark for graceful end_call instead of waiting for the disconnect.
+        if hold_result.voicemail_dump_detected:
+            logger.warning("Voicemail-dump pattern detected — marking for graceful end")
+            self._extracted["call_outcome"] = "voicemail_dump"
+            record_hold_event(
+                self._tenant_id, "voicemail_dump",
+                call_id=self._call_id, mutuelle=self._mutuelle,
+                reason=hold_result.reason,
+                triggering_phrase=hold_result.triggering_phrase,
+            )
+
         if hold_result.hold_started:
             logger.info("Hold detected — suppressing agent response")
-            record_hold_event(self._tenant_id, "started")
+            record_hold_event(
+                self._tenant_id, "started",
+                call_id=self._call_id, mutuelle=self._mutuelle,
+                reason=hold_result.reason,
+                triggering_phrase=hold_result.triggering_phrase,
+            )
             self._last_user_utterance = corrected
             raise llm.StopResponse()
         elif hold_result.hold_timeout:
-            logger.warning("Hold timeout reached")
-            record_hold_event(self._tenant_id, "timeout")
+            logger.warning("Hold timeout reached after %.0fs", hold_result.duration)
+            record_hold_event(
+                self._tenant_id, "timeout",
+                call_id=self._call_id, mutuelle=self._mutuelle,
+                reason=hold_result.reason,
+                duration=hold_result.duration,
+            )
             self._last_user_utterance = corrected
-            raise llm.StopResponse()
+            # H5 FIX: timeout returns is_hold=False, so we DON'T raise
+            # StopResponse here. Agent should recover and try to re-engage.
         elif hold_result.is_hold:
             self._last_user_utterance = corrected
             raise llm.StopResponse()
         elif hold_result.hold_ended:
-            logger.info("Hold ended after %.0fs", hold_result.duration)
-            record_hold_event(self._tenant_id, "ended")
+            logger.info(
+                "Hold ended after %.0fs (reason=%s)",
+                hold_result.duration, hold_result.reason,
+            )
+            record_hold_event(
+                self._tenant_id, "ended",
+                call_id=self._call_id, mutuelle=self._mutuelle,
+                reason=hold_result.reason,
+                triggering_phrase=hold_result.triggering_phrase,
+                duration=hold_result.duration,
+            )
             # Warn if hold was long enough for Cartesia WS to have timed out
             # (LiveKit #2281: Cartesia websocket closes after ~60s idle)
             if hold_result.duration > 60:
