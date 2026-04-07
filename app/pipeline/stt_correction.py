@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import unicodedata
 
 
 _MUTUELLE_ALIASES_ENV = "OPTIBOT_MUTUELLE_ALIASES_PATH"
@@ -277,6 +278,27 @@ _COMME_RE = re.compile(r"\b([a-zA-Z])\s+comme\s+\w+", re.IGNORECASE)
 # This avoids importing config_registry at module level (circular import).
 _runtime_mutuelle_compiled: list[tuple[re.Pattern[str], str]] | None = None
 _runtime_aliases_version: int = 0
+_FUZZY_STOPWORDS = {
+    "bonjour",
+    "bonsoir",
+    "je",
+    "vous",
+    "appelle",
+    "part",
+    "opticien",
+    "dossier",
+    "remboursement",
+    "concernant",
+    "statut",
+    "mon",
+    "de",
+    "la",
+    "le",
+    "les",
+    "du",
+    "des",
+    "pour",
+}
 
 
 def set_runtime_aliases(aliases: dict[str, list[str]], version: int) -> None:
@@ -286,6 +308,20 @@ def set_runtime_aliases(aliases: dict[str, list[str]], version: int) -> None:
         return
     _runtime_mutuelle_compiled = _compile_alias_corrections(aliases)
     _runtime_aliases_version = version
+
+
+def _normalize_fuzzy_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower()
+
+
+def _should_consider_fuzzy_candidate(candidate: str) -> bool:
+    tokens = [
+        re.sub(r"[^a-z0-9]", "", token)
+        for token in _normalize_fuzzy_text(candidate).split()
+    ]
+    meaningful = [token for token in tokens if token and token not in _FUZZY_STOPWORDS]
+    return len(meaningful) >= 2
 
 
 def correct_transcription(text: str) -> str:
@@ -336,6 +372,8 @@ def correct_transcription(text: str) -> str:
                 for i in range(len(words) - length + 1):
                     candidate = " ".join(words[i:i+length])
                     if len(candidate) < 5:
+                        continue
+                    if not _should_consider_fuzzy_candidate(candidate):
                         continue
                     matched = match_mutuelle(candidate, score_cutoff=82.0)
                     if matched and matched.lower() != candidate.lower():

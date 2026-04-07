@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+import unicodedata
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,11 @@ def _load_phrase_list(filename: str, env_var: str, fallback: list[str]) -> list[
         except (OSError, json.JSONDecodeError):
             pass
     return result
+
+
+def _normalize_match_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower().strip()
 
 
 # ── Tier 1: System/IVR hold phrases — NEVER said by a human agent ────
@@ -133,7 +139,7 @@ class HoldDetector:
           - hold_ended: True if human voice detected after hold
           - hold_timeout: True if max hold duration exceeded
         """
-        text_lower = text.lower().strip()
+        text_lower = _normalize_match_text(text)
         if not text_lower:
             return HoldResult(is_hold=self._on_hold)
 
@@ -144,7 +150,7 @@ class HoldDetector:
 
     def _detect_not_on_hold(self, text_lower: str, original: str) -> HoldResult:
         # Tier 1: System hold → instant trigger
-        if any(phrase in text_lower for phrase in HOLD_SYSTEM_PHRASES):
+        if any(_normalize_match_text(phrase) in text_lower for phrase in HOLD_SYSTEM_PHRASES):
             self._enter_hold("system_phrase", original)
             return HoldResult(is_hold=True, hold_started=True)
 
@@ -159,7 +165,7 @@ class HoldDetector:
 
     def _detect_on_hold(self, text_lower: str, original: str) -> HoldResult:
         # FIX: >= 3 instead of > 3 (OptiBot bug: "Oui" is exactly 3 chars)
-        if any(phrase in text_lower for phrase in HUMAN_PHRASES) and len(text_lower) >= 3:
+        if self._looks_like_human_return(text_lower) and len(text_lower) >= 3:
             self._hold_duration = time.monotonic() - self._hold_start
             logger.info("HOLD ENDED after %.0fs: '%s'", self._hold_duration, original[:80])
             self._on_hold = False
@@ -175,9 +181,17 @@ class HoldDetector:
         return HoldResult(is_hold=True)
 
     def _is_ambiguous_hold(self, text_lower: str) -> bool:
-        if any(phrase in text_lower for phrase in AGENT_WORKING_PHRASES):
+        if any(_normalize_match_text(phrase) in text_lower for phrase in AGENT_WORKING_PHRASES):
             return False
-        return any(phrase in text_lower for phrase in HOLD_AMBIGUOUS_PHRASES)
+        return any(_normalize_match_text(phrase) in text_lower for phrase in HOLD_AMBIGUOUS_PHRASES)
+
+    def _looks_like_human_return(self, text_lower: str) -> bool:
+        if any(_normalize_match_text(phrase) in text_lower for phrase in HUMAN_PHRASES):
+            return True
+        return any(
+            phrase in text_lower
+            for phrase in ("je reprends", "je reviens avec vous", "je suis de retour")
+        )
 
     def _check_ambiguous_threshold(self) -> bool:
         now = time.monotonic()

@@ -90,16 +90,16 @@ class ResponseQueue:
 
 # ── Filler responses for partial response pattern ──
 FILLERS_PROCESSING = [
-    "Un instant...",
-    "Je verifie...",
-    "Attendez, je regarde...",
-    "Laissez-moi verifier ca...",
+    "Une seconde.",
+    "Je reprends.",
+    "Merci, je poursuis.",
+    "Oui, je continue.",
 ]
 
 FILLERS_HOLD_RETURN = [
-    "Oui je suis toujours la.",
-    "Je suis la, merci d'avoir patiente.",
-    "Merci pour votre patience.",
+    "Je suis toujours en ligne.",
+    "Merci, je reprends avec vous.",
+    "Merci d'avoir patiente, je reprends.",
 ]
 
 

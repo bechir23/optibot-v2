@@ -17,9 +17,7 @@ class TestVariations:
 
     def test_silence_returns_empty(self):
         n = ResponseNaturalizer()
-        result = asyncio.get_event_loop().run_until_complete(
-            n.naturalize("P3_SILENCE", "", {})
-        )
+        result = asyncio.run(n.naturalize("P3_SILENCE", "", {}))
         assert result == ""
 
 
@@ -28,9 +26,7 @@ class TestAntiRepeat:
         n = ResponseNaturalizer()
         results = set()
         for _ in range(10):
-            result = asyncio.get_event_loop().run_until_complete(
-                n.naturalize("P3_ACK", "OK", {})
-            )
+            result = asyncio.run(n.naturalize("P3_ACK", "OK", {}))
             results.add(result)
         # Should have at least 2 different responses in 10 tries
         assert len(results) >= 2
@@ -50,7 +46,7 @@ class TestTransitions:
         # Run multiple times — sometimes should get "Oui, " prefix
         has_transition = False
         for _ in range(20):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 n.naturalize("P3_ACK", "OK", {}, last_utterance="Quel est le statut ?")
             )
             if result.startswith("Oui"):
@@ -63,9 +59,7 @@ class TestTransitions:
         n = ResponseNaturalizer()
         has_hold_prefix = False
         for _ in range(20):
-            result = asyncio.get_event_loop().run_until_complete(
-                n.naturalize("P3_ACK", "OK", {}, from_hold=True)
-            )
+            result = asyncio.run(n.naturalize("P3_ACK", "OK", {}, from_hold=True))
             if "toujours la" in result:
                 has_hold_prefix = True
                 break
@@ -74,16 +68,14 @@ class TestTransitions:
 class TestTemplateFormatting:
     def test_patient_name_substitution(self):
         n = ResponseNaturalizer()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             n.naturalize("P3_GIVE_PATIENT", "{patient_name}", {"patient_name": "Dupont"})
         )
         assert "Dupont" in result
 
     def test_missing_key_does_not_crash(self):
         n = ResponseNaturalizer()
-        result = asyncio.get_event_loop().run_until_complete(
-            n.naturalize("P3_GIVE_PATIENT", "{unknown_key}", {})
-        )
+        result = asyncio.run(n.naturalize("P3_GIVE_PATIENT", "{unknown_key}", {}))
         assert result  # Should return something
 
 
@@ -111,8 +103,6 @@ class TestReset:
     def test_reset_clears_history(self):
         n = ResponseNaturalizer()
         for _ in range(5):
-            asyncio.get_event_loop().run_until_complete(
-                n.naturalize("P3_ACK", "OK", {})
-            )
+            asyncio.run(n.naturalize("P3_ACK", "OK", {}))
         n.reset()
         assert n._used == {}

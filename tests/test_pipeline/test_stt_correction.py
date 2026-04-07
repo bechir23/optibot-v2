@@ -93,6 +93,10 @@ class TestNoFalsePositives:
         text = "Bonjour, je voudrais savoir le statut de mon remboursement"
         assert correct_transcription(text) == text
 
+    def test_opening_phrase_does_not_become_mutuelle_name(self):
+        text = "Bonjour, je vous appelle de la part de l'opticien concernant un dossier de remboursement."
+        assert correct_transcription(text) == text
+
     def test_finesse_not_finess(self):
         # "finesse" is a real French word, should not be corrected
         # (only "finess" without trailing 'e' should match)

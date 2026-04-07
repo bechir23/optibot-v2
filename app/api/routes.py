@@ -70,6 +70,8 @@ class HealthResponse(BaseModel):
 
 
 def _check_auth(authorization: str | None):
+    if settings.api_auth_required and not settings.api_key:
+        raise HTTPException(status_code=503, detail="API auth is required but no API key is configured")
     if settings.api_key and authorization != f"Bearer {settings.api_key}":
         raise HTTPException(status_code=401, detail="Invalid API key")
 

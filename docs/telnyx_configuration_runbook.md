@@ -48,6 +48,29 @@ your account. Source: [Telnyx LiveKit configuration guide](https://developers.te
 
 ## Required Telnyx Portal Configuration
 
+### Interpreting recent portal changes
+
+If you have already:
+- switched the Voice API application anchorsite to **Frankfurt**
+- created a **SIP Connection**
+- created an **Outbound Voice Profile**
+
+then you are only partway done. Those changes are necessary, but they do
+**not** by themselves make the current repo able to dial.
+
+The runtime still needs all of the following to be true:
+- the SIP Connection is fully completed with outbound auth and codec choices
+- the Outbound Voice Profile is attached to the SIP Connection
+- the correct numbers / destinations are enabled on the profile
+- a **LiveKit outbound SIP trunk** exists and points at that Telnyx setup
+- the repo env contains the **LiveKit outbound trunk ID**, not just the Telnyx portal object IDs
+
+Important distinction:
+- **Telnyx SIP Connection ID**: object created in the Telnyx portal
+- **LiveKit outbound trunk ID**: object created in LiveKit and consumed by `create_sip_participant()`
+
+This repo dials through the LiveKit outbound trunk. The Telnyx portal setup is the provider-side dependency behind it.
+
 ### 1. Anchorsite (Voice API region)
 
 Navigate to **Voice API** > **Applications** > [your app] > **Anchorsite**
@@ -159,6 +182,21 @@ Create via CLI:
 lk sip outbound create telnyx-france-trunk.json
 ```
 
+After creation, store the resulting LiveKit trunk ID in:
+
+```env
+LIVEKIT_SIP_OUTBOUND_TRUNK_ID=ST_xxxxxxxxxxxxx
+```
+
+Backward compatibility:
+
+```env
+TELNYX_SIP_TRUNK_ID=ST_xxxxxxxxxxxxx
+```
+
+That older variable name is misleading. In this repo it must contain the
+**LiveKit** trunk ID, not the raw Telnyx portal SIP Connection ID.
+
 ### Critical parameters explained
 
 - **`destination_country`: `"FR"`** — LiveKit region pinning. Calls originate
@@ -232,8 +270,11 @@ After configuration, verify with an outbound test call to a French number:
 - [ ] `lk sip outbound list` shows trunk with `destination_country: FR`
 - [ ] `lk sip outbound list` shows `headers_to_attributes` includes `X-Telnyx-Username`
 - [ ] Telnyx portal shows anchorsite = Frankfurt/Paris/Amsterdam/London
+- [ ] Telnyx SIP Connection has the Outbound Voice Profile attached
+- [ ] Telnyx SIP Connection outbound auth username/password are recorded
 - [ ] Telnyx number is G.711 (NOT HD Voice / G.722) if DTMF is needed
 - [ ] Telnyx portal shows SIP REFER enabled if you use warm transfers
+- [ ] Repo `.env` contains `LIVEKIT_SIP_OUTBOUND_TRUNK_ID`
 - [ ] Test call RTT feels natural (< 800ms turn-to-turn)
 - [ ] Agent logs show `sip.callID` populated
 - [ ] Agent process is in EU region (check `lk project list`)

@@ -1,4 +1,5 @@
 """Centralized configuration — all env vars, no hardcoded values."""
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -34,7 +35,10 @@ class Settings(BaseSettings):
 
     # ── Telephony ────────────────────────────────────
     telnyx_api_key: str = ""
+    livekit_sip_outbound_trunk_id: str = ""
     telnyx_sip_trunk_id: str = ""
+    telnyx_username: str = ""
+    sip_destination_country: str = "FR"
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""
@@ -60,12 +64,14 @@ class Settings(BaseSettings):
 
     # ── Security ─────────────────────────────────────
     api_key: str = ""
+    api_auth_required: bool = True
     dossier_encryption_key: str = ""
 
     # ── Feature flags (Microsoft pattern: runtime-tunable) ──
     answer_soft_timeout_sec: float = 4.0
     answer_hard_timeout_sec: float = 15.0
     phone_silence_timeout_sec: float = 20.0
+    participant_join_timeout_sec: float = 60.0
     max_ivr_attempts: int = 5
     max_concurrent_calls: int = 10
     recording_enabled: bool = False
@@ -77,3 +83,14 @@ class Settings(BaseSettings):
     port: int = 8080
     debug: bool = False
     log_level: str = "info"
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def coerce_debug(cls, value):
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"release", "prod", "production"}:
+                return False
+            if lowered in {"debug", "dev", "development"}:
+                return True
+        return value

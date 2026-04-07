@@ -63,6 +63,12 @@ class TestHoldEnd:
         result = d.detect("alors")
         assert result.hold_ended
 
+    def test_je_reprends_ends_hold(self):
+        d = HoldDetector()
+        d.detect("veuillez patienter")
+        result = d.detect("Desole, je reprends.")
+        assert result.hold_ended
+
     def test_short_text_does_not_end_hold(self):
         """Very short text (1-2 chars) should not end hold."""
         d = HoldDetector()

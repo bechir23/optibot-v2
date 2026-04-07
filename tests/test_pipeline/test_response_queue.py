@@ -77,8 +77,8 @@ class TestFiller:
 
     def test_exclude_works(self):
         for _ in range(20):
-            f = pick_filler("processing", exclude="Un instant...")
-            assert f != "Un instant..."
+            f = pick_filler("processing", exclude="Une seconde.")
+            assert f != "Une seconde."
 
 
 class TestConditionalResponse:

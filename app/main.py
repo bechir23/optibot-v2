@@ -60,6 +60,41 @@ def _get_shared_vad_model() -> Any:
     return _SHARED_VAD_MODEL
 
 
+def _local_loopback_greeting(dossier_type: str) -> str:
+    return (
+        "Commence par une salutation breve et naturelle, sans outil et sans formule d'attente. "
+        f"Presente-toi comme l'assistant automatique de suivi tiers payant de l'opticien au sujet d'un dossier {dossier_type}. "
+        "Demande ensuite si vous etes bien au bon service."
+    )
+
+
+def _inbound_greeting() -> str:
+    return (
+        "Commence par une vraie salutation d'accueil, sans formule d'attente ni verification. "
+        "Dis simplement que l'appelant est bien chez l'opticien puis demande comment tu peux aider."
+    )
+
+
+async def _greet_when_participant_ready(ctx, session, *, label: str, instructions: str) -> bool:
+    try:
+        participant = await asyncio.wait_for(
+            ctx.wait_for_participant(),
+            timeout=max(0.1, settings.participant_join_timeout_sec),
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "No participant joined within %.1fs for %s room=%s; skipping proactive greeting",
+            settings.participant_join_timeout_sec,
+            label,
+            ctx.room.name,
+        )
+        return False
+
+    logger.info("%s: participant %s joined, generating greeting", label, participant.identity)
+    await session.generate_reply(instructions=instructions, tool_choice="none")
+    return True
+
+
 @dataclass
 class AppState:
     redis: RedisClient | None = None
@@ -462,17 +497,34 @@ async def outbound_session(ctx):
         if not phone_number:
             return
 
-        sip_trunk_id = metadata.get("sip_trunk_id", settings.telnyx_sip_trunk_id)
+        sip_trunk_id = metadata.get(
+            "sip_trunk_id",
+            settings.livekit_sip_outbound_trunk_id or settings.telnyx_sip_trunk_id,
+        )
+        destination_country = str(
+            metadata.get("sip_destination_country") or settings.sip_destination_country or ""
+        ).strip().upper()
+        telnyx_username = str(metadata.get("telnyx_username") or settings.telnyx_username or "").strip()
+        sip_headers: dict[str, str] = {}
+        if telnyx_username:
+            sip_headers["X-Telnyx-Username"] = telnyx_username
+
         for attempt in range(3):
             try:
+                request_kwargs: dict[str, Any] = {
+                    "room_name": ctx.room.name,
+                    "sip_trunk_id": sip_trunk_id,
+                    "sip_call_to": phone_number,
+                    "participant_identity": phone_number,
+                    "wait_until_answered": True,
+                }
+                if destination_country:
+                    request_kwargs["destination"] = api.Destination(country=destination_country)
+                if sip_headers:
+                    request_kwargs["headers"] = sip_headers
+
                 await ctx.api.sip.create_sip_participant(
-                    api.CreateSIPParticipantRequest(
-                        room_name=ctx.room.name,
-                        sip_trunk_id=sip_trunk_id,
-                        sip_call_to=phone_number,
-                        participant_identity=phone_number,
-                        wait_until_answered=True,
-                    )
+                    api.CreateSIPParticipantRequest(**request_kwargs)
                 )
                 logger.info("Outbound call answered: %s", phone_number)
                 if app_state.call_state:
@@ -864,16 +916,16 @@ async def outbound_session(ctx):
     # actually join the room, THEN greet. Otherwise the agent speaks to
     # an empty room before the user connects and the user hears nothing.
     if phone_number is None:
-        try:
-            participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=60.0)
-            logger.info("Local loopback: participant %s joined, generating greeting", participant.identity)
-            await session.generate_reply()
-        except asyncio.TimeoutError:
+        greeted = await _greet_when_participant_ready(
+            ctx,
+            session,
+            label="outbound-local-loopback",
+            instructions=_local_loopback_greeting(dossier.get("dossier_type", "optique")),
+        )
+        if not greeted:
             logger.warning("Local loopback: no participant joined within 60s; shutting down")
             ctx.shutdown()
             return
-        except Exception as e:
-            logger.error("Failed to wait for participant in local loopback: %s", e)
 
     # End-of-session finalization via add_shutdown_callback.
     # More reliable than room.on("disconnected") which has known issues:
@@ -989,6 +1041,7 @@ async def inbound_session(ctx):
         call_id=ctx.room.name,
         call_state_store=app_state.call_state,
         rag_service=app_state.rag,
+        call_mode="inbound",
     )
 
     from app.pipeline.keyterm_builder import build_keyterms
@@ -1076,16 +1129,16 @@ async def inbound_session(ctx):
     # session.start() auto-connects, so ctx.connect() is redundant but
     # kept for explicit intent.
     await ctx.connect()
-    try:
-        participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=60.0)
-        logger.info("Inbound: participant %s joined, generating greeting", participant.identity)
-        await session.generate_reply()
-    except asyncio.TimeoutError:
+    greeted = await _greet_when_participant_ready(
+        ctx,
+        session,
+        label="inbound",
+        instructions=_inbound_greeting(),
+    )
+    if not greeted:
         logger.warning("Inbound: no caller joined within 60s; shutting down")
         ctx.shutdown()
         return
-    except Exception as e:
-        logger.error("Failed to wait for participant on inbound: %s", e)
 
     async def _finalize_inbound_on_shutdown(reason: str = "") -> None:
         if not agent.extracted_data.get("call_outcome"):
@@ -1145,7 +1198,13 @@ async def dispatch_outbound_call(
         "phone_number": phone_number,
         "dossier": dossier,
         "tenant_id": tenant_id,
-        "sip_trunk_id": sip_trunk_id or settings.telnyx_sip_trunk_id,
+        "sip_trunk_id": (
+            sip_trunk_id
+            or settings.livekit_sip_outbound_trunk_id
+            or settings.telnyx_sip_trunk_id
+        ),
+        "telnyx_username": settings.telnyx_username,
+        "sip_destination_country": settings.sip_destination_country,
     })
 
     try:

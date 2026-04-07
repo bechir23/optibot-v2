@@ -1,5 +1,9 @@
 """Tests for OutboundCallerAgent tool methods."""
+import asyncio
+from types import SimpleNamespace
+
 import pytest
+from livekit.agents import llm
 
 pytest.importorskip("livekit.agents", reason="livekit-agents dependency required for agent tests")
 
@@ -58,6 +62,27 @@ class TestAgentToolMethods:
         assert "78%" in agent._instructions
         assert "MGEN" in agent._instructions
 
+    def test_inbound_mode_uses_reception_instructions(self):
+        agent = OutboundCallerAgent(call_mode="inbound")
+        assert "accueil telephonique" in agent._instructions
+        assert "Comment puis-je vous aider" in agent._instructions
+        assert "suivre un remboursement" not in agent._instructions
+
     def test_extracted_data_initially_empty(self):
         agent = OutboundCallerAgent()
         assert agent.extracted_data == {}
+
+    def test_acknowledge_and_wait_is_silent(self):
+        agent = OutboundCallerAgent(mutuelle="MGEN")
+        result = asyncio.run(agent.acknowledge_and_wait(SimpleNamespace()))
+        assert result == ""
+
+    def test_hold_turn_raises_stop_response(self):
+        agent = OutboundCallerAgent(mutuelle="MGEN")
+        with pytest.raises(llm.StopResponse):
+            asyncio.run(
+                agent.on_user_turn_completed(
+                    SimpleNamespace(),
+                    SimpleNamespace(content=["veuillez patienter"]),
+                )
+            )
