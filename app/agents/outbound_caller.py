@@ -99,7 +99,7 @@ Obtenir le statut du dossier, un delai de traitement, et le nom de l'interlocute
 - detected_answering_machine: SI tu entends un repondeur (PAS end_call)
 - escalate_to_human: si la situation depasse tes capacites
 
-REGLE TOOLS: Ne prononce JAMAIS le nom d'un outil. Ne melange JAMAIS parole et appel d'outil dans la meme reponse — parle d'abord ("D'accord, je note"), puis appelle l'outil au tour suivant.
+REGLE TOOLS: Ne prononce jamais le nom d'un outil. Appelle l'outil directement sans annoncer l'action. NE DIS JAMAIS "un instant", "je verifie", "laissez-moi verifier", "je regarde", "je reflechis" — ces phrases creent une boucle. Reponds directement au correspondant avec une information ou une question.
 
 # Conversation Flow
 1. Attendre la reponse du correspondant (ne parle pas en premier sauf greeting initial).
@@ -129,8 +129,9 @@ Ne JAMAIS laisser de message vocal (regle CNIL/Bloctel pour prospection B2B).
 
 # Guardrails
 - Tu es un assistant automatique. Si on te demande: "Je suis l'assistant de suivi automatique de chez l'opticien."
-- Vouvoiement STRICT. Si l'interlocuteur te tutoie, continue a le vouvoyer. Ne passe JAMAIS au tutoiement.
-- Quand tu annonces une action ("je note", "je verifie", "je cherche"), appelle l'outil correspondant DANS LA MEME reponse. Ne promets jamais une action sans la faire.
+- Vouvoiement STRICT. Si l'interlocuteur te tutoie, continue a le vouvoyer.
+- INTERDIT de repeter la meme phrase deux fois de suite. INTERDIT de dire "un instant" / "je verifie" / "laissez-moi" / "je regarde" / "je reflechis". Ces phrases sont bannies.
+- Chaque reponse apporte une information concrete OU pose une question precise. Rien d'autre.
 - Ne donne NIR ou date de naissance que si l'interlocuteur le demande explicitement.
 - SVI impossible apres 3 tentatives: end_call(raison="svi_trop_complexe").
 - Mauvais numero: "Excusez-moi, bonne journee." + end_call.
@@ -156,47 +157,29 @@ Ne JAMAIS laisser de message vocal (regle CNIL/Bloctel pour prospection B2B).
         self._call_start = time.time()
         self._finalized = False
 
-    # Filler phrases for LLM soft timeout — rotated to avoid repetition.
-    # Microsoft call-center-ai pattern: play filler after 3s.
-    _LLM_FILLERS = [
-        "Un instant...",
-        "Je reflechis...",
-        "Attendez, je verifie...",
-        "Laissez-moi verifier...",
-    ]
-    _LLM_SOFT_TIMEOUT_SEC = 3.0
-    _filler_index = 0
-
     async def llm_node(self, chat_ctx, tools, model_settings):
-        """Override LLM node: measure latency + soft timeout with filler.
+        """Override LLM node: measure latency only.
 
-        If the LLM takes >3s to produce the first chunk, yields a filler
-        phrase to prevent dead air. Uses asyncio.wait() (NOT wait_for)
-        because wait_for cancels the underlying coroutine on timeout,
-        which destroys the LLM async generator permanently.
+        IMPORTANT: we do NOT inject filler phrases here. The previous
+        implementation yielded "Un instant..." / "Je réfléchis..." /
+        "Laissez-moi vérifier..." whenever the first LLM chunk took >3s,
+        which compounded into a loop where the agent prefixed every
+        slow response with a wait phrase. Production systems (OpenAI
+        Realtime, Retell, Vapi) do NOT prepend fillers to LLM output —
+        they either rely on preemptive_generation (already enabled on
+        our AgentSession) or use deterministic pre-tool speech tied to
+        specific tool calls.
+
+        If we want to prevent dead air during slow LLM inference, the
+        correct fix is at the infrastructure level (faster LLM, EU POP,
+        prompt caching) not at the speech level.
         """
         llm_start = time.monotonic()
         first_chunk = True
-        filler_emitted = False
-
         async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
             if first_chunk:
-                elapsed = time.monotonic() - llm_start
-                observe_llm_latency_ms(elapsed * 1000.0)
+                observe_llm_latency_ms((time.monotonic() - llm_start) * 1000.0)
                 first_chunk = False
-                # If first chunk took too long AND we haven't spoken yet,
-                # emit filler before the actual response.
-                # Note: this fires synchronously when the chunk arrives,
-                # so the filler plays right before the real response.
-                if elapsed > self._LLM_SOFT_TIMEOUT_SEC and not filler_emitted:
-                    filler = self._LLM_FILLERS[self._filler_index % len(self._LLM_FILLERS)]
-                    self._filler_index += 1
-                    logger.warning(
-                        "LLM slow first chunk (%.1fs) — prepending filler: %s",
-                        elapsed, filler,
-                    )
-                    yield filler
-                    filler_emitted = True
             yield chunk
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
