@@ -59,6 +59,11 @@ class OutboundCallerAgent(Agent):
                 parts.append(f"Memoire mutuelle:\n{rag_context['mutuelle_memory']}")
             if rag_context.get("action_policy"):
                 parts.append(f"Actions disponibles par taux de succes:\n{rag_context['action_policy']}")
+            # IVR handoff context (set by IVRNavigatorAgent.human_answered)
+            if rag_context.get("ivr_summary"):
+                parts.append(f"Contexte SVI: {rag_context['ivr_summary']}")
+            if rag_context.get("svi_path_used"):
+                parts.append(f"Chemin SVI utilise: {rag_context['svi_path_used']}")
             if parts:
                 rag_section = f"\nCONTEXTE {mutuelle}:\n" + "\n".join(parts)
 
@@ -81,7 +86,7 @@ REGLE CRITIQUE: Ne combine JAMAIS parole et appel d'outil dans la meme reponse. 
 PREMIER MESSAGE: Le systeme envoie le greeting automatiquement. Ne le repete pas.
 
 DETECTION SVI/REPONDEUR:
-- Repondeur: end_call (raison: "repondeur"). Pas de message vocal.
+- Repondeur/messagerie vocale: appelle detected_answering_machine (pas end_call). Ne laisse JAMAIS de message.
 - SVI: Ecoute le menu, choisis "remboursement/tiers payant/optique". Apres 3 menus sans humain: end_call (raison: "svi_trop_complexe").
 - Mauvais numero: "Excusez-moi, bonne journee." + end_call.
 
@@ -398,17 +403,40 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
 
     # ── Call control ───────────────────────────────────────
 
-    async def _schedule_graceful_shutdown(self, ctx: RunContext, delay: float = 4.0) -> None:
-        """Schedule session shutdown after a short delay for goodbye TTS to finish."""
-        async def _shutdown():
-            await asyncio.sleep(delay)
-            try:
-                session = ctx.session
-                if session:
-                    await session.aclose()
-            except Exception as e:
-                logger.warning("Graceful shutdown failed: %s", e)
-        asyncio.create_task(_shutdown())
+    async def _hangup(self) -> None:
+        """Hang up the call by deleting the room.
+
+        Official livekit-examples/outbound-caller-python pattern.
+        """
+        try:
+            from livekit import api
+            from livekit.agents import get_job_context
+            job_ctx = get_job_context()
+            if job_ctx:
+                await job_ctx.api.room.delete_room(
+                    api.DeleteRoomRequest(room=job_ctx.room.name)
+                )
+        except Exception as e:
+            logger.warning("Hangup failed: %s", e)
+
+    async def _graceful_hangup(self, ctx: RunContext) -> None:
+        """Wait for current TTS to finish playing, then hang up.
+
+        Official livekit-examples pattern:
+            current_speech = ctx.session.current_speech
+            if current_speech:
+                await current_speech.wait_for_playout()
+            await self.hangup()
+
+        This is the correct way to hang up without cutting off the goodbye.
+        """
+        try:
+            current_speech = ctx.session.current_speech
+            if current_speech:
+                await current_speech.wait_for_playout()
+        except Exception as e:
+            logger.warning("wait_for_playout failed: %s", e)
+        await self._hangup()
 
     @function_tool()
     async def end_call(self, ctx: RunContext, reason: str, summary: str = "") -> str:
@@ -422,8 +450,10 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         self._extracted["call_outcome"] = reason
         self._extracted["call_summary"] = summary
         await self._finalize_call()
-        # Schedule shutdown after goodbye TTS finishes playing
-        await self._schedule_graceful_shutdown(ctx)
+        # Say goodbye first, then wait for TTS to finish, then hang up.
+        # Schedule the hangup as a background task so this tool returns
+        # immediately and the LLM's goodbye text gets generated and spoken.
+        asyncio.create_task(self._graceful_hangup(ctx))
         return "Merci beaucoup pour votre aide. Bonne journee !"
 
     @function_tool()
@@ -511,8 +541,21 @@ Tu appelles {mutuelle} pour suivre un remboursement {dossier_type}.
         self._extracted["escalation_reason"] = reason
         self._extracted["call_outcome"] = "escalated"
         await self._finalize_call()
-        await self._schedule_graceful_shutdown(ctx)
+        asyncio.create_task(self._graceful_hangup(ctx))
         return "Je vais devoir verifier avec l'opticien. Puis-je vous rappeler ?"
+
+    @function_tool()
+    async def detected_answering_machine(self, ctx: RunContext) -> str:
+        """Called when the call reaches a voicemail/answering machine (répondeur).
+        Use this tool AFTER you hear the voicemail greeting. Do NOT leave a message.
+        """
+        await self._record_tool("detected_answering_machine")
+        self._extracted["call_outcome"] = "voicemail"
+        logger.info("Voicemail detected — hanging up")
+        await self._finalize_call()
+        # Immediate hangup — no goodbye needed for voicemail
+        asyncio.create_task(self._hangup())
+        return "Repondeur detecte, appel termine."
 
     @property
     def extracted_data(self) -> dict[str, Any]:
