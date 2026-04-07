@@ -34,17 +34,28 @@ trunk could inadvertently use another customer's Telnyx SIP connection if
 the source IPs overlap.
 
 **Mitigation (required)**: In your LiveKit `SIPOutboundTrunk`, add the
-`X-Telnyx-Username` header so Telnyx always runs digest authentication:
+`X-Telnyx-Username` header to the `headers` field so Telnyx sees the
+username on the first INVITE and correctly scopes the call to your
+account:
 
 ```json
-"headers_to_attributes": {
+"headers": {
   "X-Telnyx-Username": "YOUR_TELNYX_USERNAME"
 }
 ```
 
-This forces Telnyx to respond with 407 Proxy Authentication Required,
-triggering the SIP digest auth flow and correctly scoping the call to
-your account. Source: [Telnyx LiveKit configuration guide](https://developers.telnyx.com/docs/voice/sip-trunking/livekit-configuration-guide).
+**IMPORTANT — correct field**: Use `headers` (outbound INVITE direction),
+**NOT** `headers_to_attributes` (which maps inbound 200 OK response
+headers to participant attributes — opposite direction). This was
+verified against `livekit/protocol/protobufs/livekit_sip.proto`
+`SIPOutboundTrunkInfo` field 9 (`headers`) vs field 10
+(`headers_to_attributes`). Earlier drafts of this runbook and the
+`scripts/telnyx_setup.py` helper used the wrong field — fixed in
+commit that followed research agent finding from
+livekit/sip issue #358.
+
+Source: [Telnyx LiveKit configuration guide](https://developers.telnyx.com/docs/voice/sip-trunking/livekit-configuration-guide),
+[livekit/sip #358](https://github.com/livekit/sip/issues/358).
 
 ## Required Telnyx Portal Configuration
 
@@ -169,7 +180,7 @@ configuration:
     "auth_username": "YOUR_TELNYX_USERNAME",
     "auth_password": "YOUR_TELNYX_PASSWORD",
     "destination_country": "FR",
-    "headers_to_attributes": {
+    "headers": {
       "X-Telnyx-Username": "YOUR_TELNYX_USERNAME"
     }
   }
@@ -207,10 +218,16 @@ That older variable name is misleading. In this repo it must contain the
   GeoDNS. Telnyx does not publish region-specific signaling endpoints.
   The regional routing happens via your Telnyx account anchorsite setting.
 
-- **`headers_to_attributes`** with `X-Telnyx-Username`: **SECURITY-CRITICAL**
-  (see Security Notice above). Also eliminates a 407 auth round-trip,
-  saving 60-200ms of connection setup time.
-  Source: <https://developers.telnyx.com/docs/voice/sip-trunking/livekit-configuration-guide>
+- **`headers`** with `X-Telnyx-Username`: **SECURITY-CRITICAL**
+  (see Security Notice above). The `headers` field (protobuf field 9)
+  is sent ON THE OUTBOUND INVITE (LiveKit -> Telnyx). Do NOT use
+  `headers_to_attributes` (field 10) for this — that maps inbound
+  response headers to participant attributes, opposite direction.
+  Without this, Telnyx will challenge every call with 407 Proxy
+  Authentication Required (adding 60-200ms round-trip) AND there
+  is a cross-customer SIP IP collision security risk.
+  Source: <https://developers.telnyx.com/docs/voice/sip-trunking/livekit-configuration-guide>,
+  [livekit/sip #358](https://github.com/livekit/sip/issues/358)
 
 ## LiveKit Cloud Region
 
@@ -268,7 +285,7 @@ Source: [Telnyx AMD docs](https://developers.telnyx.com/docs/voice/programmable-
 After configuration, verify with an outbound test call to a French number:
 
 - [ ] `lk sip outbound list` shows trunk with `destination_country: FR`
-- [ ] `lk sip outbound list` shows `headers_to_attributes` includes `X-Telnyx-Username`
+- [ ] `lk sip outbound list` shows `headers` (NOT `headers_to_attributes`) includes `X-Telnyx-Username`
 - [ ] Telnyx portal shows anchorsite = Frankfurt/Paris/Amsterdam/London
 - [ ] Telnyx SIP Connection has the Outbound Voice Profile attached
 - [ ] Telnyx SIP Connection outbound auth username/password are recorded

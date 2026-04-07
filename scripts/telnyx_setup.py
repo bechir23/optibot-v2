@@ -9,12 +9,15 @@ work locally on your machine where Telnyx is reachable.
 WHAT IT DOES:
 1. Reads LiveKit and Telnyx credentials from environment variables.
 2. Lists existing LiveKit outbound SIP trunks.
-3. If a trunk named TRUNK_NAME already exists, prints its ID and exits OK.
+3. If a trunk named TRUNK_NAME already exists, prints its ID and runs
+   a healthcheck (verifies X-Telnyx-Username is in headers and
+   destination_country is set).
 4. Otherwise creates one with:
    - address = sip.telnyx.com (Telnyx GeoDNS, anchorsite handles regional routing)
    - destination_country = "FR" (LiveKit region pinning to nearest EU POP)
-   - headers_to_attributes includes X-Telnyx-Username
-     (SECURITY: prevents cross-customer SIP IP collision per Telnyx docs)
+   - headers includes X-Telnyx-Username (field 9, sent on outbound INVITE)
+     NOT headers_to_attributes (field 10, inbound-only mapping direction)
+     SECURITY: prevents cross-customer SIP IP collision per Telnyx docs.
    - auth_username + auth_password from env
 5. Prints the new trunk ID and the .env line you need to add.
 
@@ -116,11 +119,44 @@ async def main() -> int:
                 print(f"  Address:            {trunk.address}")
                 print(f"  Numbers:            {list(trunk.numbers)}")
                 print(f"  Destination:        {trunk.destination_country or '(none)'}")
+                print(f"  Headers (INVITE):   {dict(trunk.headers)}")
                 print(f"  Headers to attrs:   {dict(trunk.headers_to_attributes)}")
                 print()
+
+                # Health check: assert the trunk has what we need
+                warnings: list[str] = []
+                if not str(trunk.sip_trunk_id).startswith("ST_"):
+                    warnings.append(
+                        f"Trunk ID {trunk.sip_trunk_id!r} does not start with 'ST_' "
+                        "(expected LiveKit outbound trunk format)"
+                    )
+                if "X-Telnyx-Username" not in dict(trunk.headers):
+                    warnings.append(
+                        "X-Telnyx-Username is MISSING from trunk.headers. "
+                        "This means LiveKit will NOT send the username on the "
+                        "outbound INVITE, so Telnyx will challenge every call "
+                        "with 407 Proxy Authentication Required, AND there is "
+                        "a cross-customer SIP IP collision security risk. "
+                        "Delete this trunk and re-run this script to fix."
+                    )
+                if not trunk.destination_country:
+                    warnings.append(
+                        "destination_country is empty. LiveKit region pinning "
+                        "is disabled. Calls may route via US POPs even for "
+                        "French destinations. Re-run with TELNYX_DESTINATION_COUNTRY=FR."
+                    )
+                if warnings:
+                    print("WARNINGS:")
+                    for w in warnings:
+                        print(f"  - {w}")
+                    print()
+                else:
+                    print("Healthcheck: OK")
+                    print()
+
                 print("Add this to your .env file:")
                 print(f"  LIVEKIT_SIP_OUTBOUND_TRUNK_ID={trunk.sip_trunk_id}")
-                return 0
+                return 0 if not warnings else 4
 
         # Step 2: create the trunk
         print()
@@ -135,7 +171,14 @@ async def main() -> int:
             # SECURITY: X-Telnyx-Username forces digest auth on every call.
             # Without this, Telnyx may match a SIP IP connection belonging
             # to a DIFFERENT customer if source IPs collide on shared infra.
-            headers_to_attributes={"X-Telnyx-Username": telnyx_username},
+            #
+            # IMPORTANT: use `headers` (field 9), NOT `headers_to_attributes`.
+            # - `headers` are sent ON THE OUTBOUND INVITE (LiveKit -> Telnyx).
+            # - `headers_to_attributes` maps inbound 200 OK response headers
+            #   to LiveKit participant attributes (opposite direction).
+            # Source: livekit/protocol/protobufs/livekit_sip.proto,
+            # livekit/sip issue #358.
+            headers={"X-Telnyx-Username": telnyx_username},
         )
         create_resp = await lk.sip.create_sip_outbound_trunk(
             CreateSIPOutboundTrunkRequest(trunk=trunk_info)
@@ -151,7 +194,7 @@ async def main() -> int:
         print(f"  Address:            {new_trunk.address}")
         print(f"  Numbers:            {list(new_trunk.numbers)}")
         print(f"  Destination:        {new_trunk.destination_country}")
-        print(f"  Headers to attrs:   {dict(new_trunk.headers_to_attributes)}")
+        print(f"  Headers (INVITE):   {dict(new_trunk.headers)}")
         print()
         print("Add this to your .env file:")
         print(f"  LIVEKIT_SIP_OUTBOUND_TRUNK_ID={new_trunk.sip_trunk_id}")
