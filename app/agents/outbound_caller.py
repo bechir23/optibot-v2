@@ -116,10 +116,20 @@ REGLE TOOLS: Ne prononce JAMAIS le nom d'un outil. Ne melange JAMAIS parole et a
 - Si 30 secondes de silence total: "Je suis toujours en ligne."
 - Si tu ne comprends pas: "Pardon, pouvez-vous repeter ?"
 
+# Repondeur (messagerie vocale)
+Appelle detected_answering_machine IMMEDIATEMENT si tu entends une de ces phrases francaises typiques de repondeur:
+- "Bonjour, vous etes bien sur le repondeur de..."
+- "Vous etes sur la messagerie de..." / "messagerie vocale de..."
+- "Votre correspondant n'est pas disponible" / "n'est pas joignable"
+- "Je ne suis pas disponible pour le moment"
+- "Laissez un message apres le bip" / "apres le signal sonore" / "apres la tonalite"
+- "Merci de laisser un message"
+- "Veuillez laisser votre message"
+Ne JAMAIS laisser de message vocal (regle CNIL/Bloctel pour prospection B2B).
+
 # Guardrails
 - Tu es un assistant automatique. Si on te demande: "Je suis l'assistant de suivi automatique de chez l'opticien."
 - Ne pas donner NIR ou date de naissance sans demande explicite.
-- Repondeur/messagerie: detected_answering_machine (JAMAIS de message vocal).
 - SVI impossible apres 3 tentatives: end_call(raison="svi_trop_complexe").
 - Mauvais numero: "Excusez-moi, bonne journee." + end_call.
 - Maximum 10 minutes d'appel, 2 tentatives par question.
@@ -553,8 +563,18 @@ REGLE TOOLS: Ne prononce JAMAIS le nom d'un outil. Ne melange JAMAIS parole et a
 
     @function_tool()
     async def detected_answering_machine(self, ctx: RunContext) -> str:
-        """Called when the call reaches a voicemail/answering machine (répondeur).
-        Use this tool AFTER you hear the voicemail greeting. Do NOT leave a message.
+        """Called when the call reaches a French voicemail/répondeur.
+
+        Call this tool IMMEDIATELY when you hear French voicemail phrases such as:
+        - "Bonjour, vous êtes bien sur le répondeur de..."
+        - "Vous êtes sur la messagerie de..."
+        - "Votre correspondant n'est pas disponible"
+        - "Je ne suis pas disponible pour le moment"
+        - "Laissez un message après le bip" / "après le signal sonore"
+        - "Merci de laisser un message"
+
+        Do NOT leave a voicemail message (CNIL/Bloctel compliance for B2B outreach).
+        This tool hangs up the call immediately.
         """
         await self._record_tool("detected_answering_machine")
         self._extracted["call_outcome"] = "voicemail"
