@@ -260,6 +260,21 @@ Ne JAMAIS laisser de message vocal (regle CNIL/Bloctel pour prospection B2B).
         # Track for naturalizer transition context
         self._last_user_utterance = corrected
 
+        # Per-turn checkpoint for crash recovery (fire-and-forget).
+        # Writes last_user_utterance + extracted data to Redis so a new
+        # agent process can resume the conversation after a crash.
+        if self._call_state_store and self._call_id:
+            async def _checkpoint_turn():
+                try:
+                    await self._call_state_store.checkpoint(
+                        self._call_id,
+                        last_user_utterance=corrected,
+                        extracted=self._extracted,
+                    )
+                except Exception as e:
+                    logger.debug("Per-turn checkpoint failed: %s", e)
+            asyncio.create_task(_checkpoint_turn())
+
         # Measures transcript post-processing latency (correction + hold decision).
         observe_stt_latency_ms((time.monotonic() - turn_start) * 1000.0)
 

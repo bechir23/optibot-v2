@@ -34,6 +34,7 @@ from app.services.rag import RAGService
 from app.services.call_state_store import CallStateStore
 from app.services.mutuelle_memory import MutuelleMemory
 from app.services.action_policy import ActionPolicy
+from app.models.session_state import CallSessionState
 from app.services.config_registry import ConfigRegistry
 from app.observability.metrics import (
     observe_rag_latency,
@@ -421,6 +422,39 @@ async def outbound_session(ctx):
             event="session_restored",
         )
 
+    # Build typed session state (canonical LiveKit userdata pattern).
+    # On crash recovery we restore from the Redis checkpoint; otherwise
+    # we construct a fresh state from dispatch metadata.
+    _dossier_type = dossier.get("dossier_type", "optique")
+    if restored_state is not None:
+        session_data = CallSessionState.from_checkpoint(
+            restored_state,
+            call_id=ctx.room.name,
+            tenant_id=tenant_id,
+            phone_number=phone_number or "",
+            mutuelle=mutuelle,
+            patient_name=dossier.get("patient_name", ""),
+            patient_dob=dossier.get("patient_dob", ""),
+            nir=dossier.get("nir", ""),
+            dossier_ref=dossier.get("dossier_ref", ""),
+            montant=float(dossier.get("montant", 0) or 0),
+            dossier_type=_dossier_type,
+        )
+    else:
+        session_data = CallSessionState(
+            call_id=ctx.room.name,
+            tenant_id=tenant_id,
+            phone_number=phone_number or "",
+            mutuelle=mutuelle,
+            patient_name=dossier.get("patient_name", ""),
+            patient_dob=dossier.get("patient_dob", ""),
+            nir=dossier.get("nir", ""),
+            dossier_ref=dossier.get("dossier_ref", ""),
+            montant=float(dossier.get("montant", 0) or 0),
+            dossier_type=_dossier_type,
+            phase="dialing" if phone_number else "conversation",
+        )
+
     async def _dial_sip_participant() -> None:
         """Dial with retry while session is already booting in parallel."""
         nonlocal call_accounted
@@ -653,11 +687,12 @@ async def outbound_session(ctx):
             else f"{settings.tts_provider}/{settings.cartesia_model}"
         )
 
-    session = AgentSession(
+    session = AgentSession[CallSessionState](
         stt=stt_model,
         llm=llm_model,
         tts=tts_model,
         vad=_get_shared_vad_model(),
+        userdata=session_data,
         turn_handling={
             "turn_detection": "stt",
             "endpointing": {
@@ -921,6 +956,27 @@ async def inbound_session(ctx):
             event="session_restored",
         )
 
+    # Build typed session state for inbound session
+    if restored_state is not None:
+        session_data = CallSessionState.from_checkpoint(
+            restored_state,
+            call_id=ctx.room.name,
+            tenant_id=tenant_id,
+            phone_number=caller_number,
+            mutuelle="inbound",
+            dossier_type="optique",
+            phase="conversation",
+        )
+    else:
+        session_data = CallSessionState(
+            call_id=ctx.room.name,
+            tenant_id=tenant_id,
+            phone_number=caller_number,
+            mutuelle="inbound",
+            dossier_type="optique",
+            phase="ringing",
+        )
+
     # Inbound agent: receptionist mode — greet caller, identify purpose, route
     agent = OutboundCallerAgent(
         patient_name="",
@@ -975,11 +1031,12 @@ async def inbound_session(ctx):
             else f"{settings.tts_provider}/{settings.cartesia_model}"
         )
 
-    session = AgentSession(
+    session = AgentSession[CallSessionState](
         stt=stt_model,
         llm=llm_model,
         tts=tts_model,
         vad=_get_shared_vad_model(),
+        userdata=session_data,
         turn_handling={
             "turn_detection": "stt",
             "endpointing": {
