@@ -865,7 +865,14 @@ async def outbound_session(ctx):
     # AMD: wire answering machine detector into user state changes (outbound only)
     if phone_number:
         from app.pipeline.amd import AnsweringMachineDetector, AnsweredBy
-        _amd = AnsweringMachineDetector()
+        from app.pipeline.amd import AMDConfig
+        _amd = AnsweringMachineDetector(config=AMDConfig(
+            detection_timeout_sec=settings.amd_detection_timeout_sec,
+            speech_threshold_ms=settings.amd_speech_threshold_ms,
+            speech_end_threshold_ms=settings.amd_speech_end_threshold_ms,
+            silence_timeout_ms=settings.amd_silence_timeout_ms,
+            human_speech_max_ms=settings.amd_human_speech_max_ms,
+        ))
         _amd_speech_start: float = 0
 
         @session.on("user_state_changed")

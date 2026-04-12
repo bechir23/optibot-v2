@@ -208,7 +208,14 @@ class OutboundCallerAgent(Agent):
         self._call_state_store = call_state_store
         self._rag_service = rag_service
         self._call_mode = call_mode
-        self._hold_detector = HoldDetector()
+        from app.config.settings import Settings as _Settings
+        _s = _Settings()
+        self._hold_detector = HoldDetector(
+            hold_timeout_secs=_s.hold_timeout_sec,
+            ambiguous_window_secs=_s.hold_ambiguous_window_sec,
+            ambiguous_threshold=_s.hold_ambiguous_threshold,
+            min_return_words=_s.hold_min_return_words,
+        )
         # L2 FIX: explicit reset on init so reused agent instances don't
         # leak hold state across calls.
         self._hold_detector.reset()
@@ -344,7 +351,7 @@ class OutboundCallerAgent(Agent):
             )
             # Warn if hold was long enough for Cartesia WS to have timed out
             # (LiveKit #2281: Cartesia websocket closes after ~60s idle)
-            if hold_result.duration > 60:
+            if hold_result.duration > _s.cartesia_ws_timeout_warning_sec:
                 logger.warning(
                     "Long hold (%.0fs) — Cartesia websocket may have reconnected; "
                     "first TTS response could have brief delay",

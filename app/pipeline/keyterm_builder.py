@@ -21,8 +21,18 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _DEFAULT_KEYTERMS_PATH = Path(__file__).resolve().parents[2] / "data" / "deepgram_keyterms.json"
-_MAX_KEYTERMS = 100
-_MAX_TOKENS = 500  # Deepgram limit
+
+# Read limits from settings if available, else use defaults.
+# Avoids import-time dependency on pydantic-settings.
+def _get_limits() -> tuple[int, int]:
+    try:
+        from app.config.settings import Settings
+        s = Settings()
+        return s.max_keyterms, s.deepgram_max_keyterm_tokens
+    except Exception:
+        return 100, 500
+
+_MAX_KEYTERMS, _MAX_TOKENS = _get_limits()
 
 
 def _estimate_tokens(terms: list[str]) -> int:

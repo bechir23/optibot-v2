@@ -216,6 +216,7 @@ class HoldDetector:
         hold_timeout_secs: float = 1200.0,  # 20 min — MGEN holds avg 15 min
         ambiguous_window_secs: float = 8.0,
         ambiguous_threshold: int = 2,
+        min_return_words: int = 4,  # weak return hints need >= N words
     ):
         self._on_hold = False
         self._hold_start: float = 0
@@ -223,6 +224,7 @@ class HoldDetector:
         self._hold_timeout = hold_timeout_secs
         self._ambiguous_window = ambiguous_window_secs
         self._ambiguous_threshold = ambiguous_threshold
+        self._min_return_words = min_return_words
         self._ambiguous_hits: list[float] = []
 
     @property
@@ -357,7 +359,7 @@ class HoldDetector:
         Returns the matching weak hint if conditions met, empty string otherwise.
         """
         words = text_lower.split()
-        if len(words) < MIN_RETURN_WORDS:
+        if len(words) < self._min_return_words:
             return ""
         first_word = words[0]
         for hint in WEAK_RETURN_HINTS:
