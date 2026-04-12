@@ -19,12 +19,12 @@ The runtime path is currently:
 ## Current Source Of Truth
 
 Use these files as the current source of truth:
-- [docs/telnyx_configuration_runbook.md](/C:/Users/bechi/optibot-v2/docs/telnyx_configuration_runbook.md)
-- [docs/realtime_production_item_list.md](/C:/Users/bechi/optibot-v2/docs/realtime_production_item_list.md)
-- [app/main.py](/C:/Users/bechi/optibot-v2/app/main.py)
-- [app/agents/outbound_caller.py](/C:/Users/bechi/optibot-v2/app/agents/outbound_caller.py)
+- [docs/telnyx_configuration_runbook.md](docs/telnyx_configuration_runbook.md)
+- [docs/realtime_production_item_list.md](docs/realtime_production_item_list.md)
+- [app/main.py](app/main.py)
+- [app/agents/outbound_caller.py](app/agents/outbound_caller.py)
 
-[claude_lastchanges.md](/C:/Users/bechi/optibot-v2/claude_lastchanges.md) is useful as historical session context, but it mixes older sandbox notes with newer work and should not be treated as the canonical current state by itself.
+[claude_lastchanges.md](claude_lastchanges.md) is useful as historical session context, but it mixes older sandbox notes with newer work and should not be treated as the canonical current state by itself.
 
 ## Important Telephony Distinction
 
@@ -54,7 +54,7 @@ Backward compatibility:
 
 ## Environment
 
-Copy [`.env.example`](/C:/Users/bechi/optibot-v2/.env.example) to `.env` and fill in the real values.
+Copy [`.env.example`](.env.example) to `.env` and fill in the real values.
 
 Most important variables:
 - `LIVEKIT_URL`
@@ -104,7 +104,7 @@ python tests/e2e_roleplay_agent.py --scenario outbound_mutuelle
 
 ## Telnyx Setup
 
-Follow [docs/telnyx_configuration_runbook.md](/C:/Users/bechi/optibot-v2/docs/telnyx_configuration_runbook.md).
+Follow [docs/telnyx_configuration_runbook.md](docs/telnyx_configuration_runbook.md).
 
 If you already changed the Telnyx portal locally:
 - anchorsite switched to Frankfurt
@@ -120,10 +120,10 @@ you still need to verify:
 
 ## Current Validation Helpers
 
-- [tests/e2e_livekit_room_probe.py](/C:/Users/bechi/optibot-v2/tests/e2e_livekit_room_probe.py): proves the deployed agent is actually present in a fresh room
-- [tests/e2e_real_audio.py](/C:/Users/bechi/optibot-v2/tests/e2e_real_audio.py): exercises TTS, STT, AMD, hold logic, and text-mode agent flow
-- [tests/e2e_roleplay_agent.py](/C:/Users/bechi/optibot-v2/tests/e2e_roleplay_agent.py): lightweight roleplay evaluator for greeting quality and banned opening phrases
-- [TEST.MD](/C:/Users/bechi/optibot-v2/TEST.MD): broader testing notes
+- [tests/e2e_livekit_room_probe.py](tests/e2e_livekit_room_probe.py): proves the deployed agent is actually present in a fresh room
+- [tests/e2e_real_audio.py](tests/e2e_real_audio.py): exercises TTS, STT, AMD, hold logic, and text-mode agent flow
+- [tests/e2e_roleplay_agent.py](tests/e2e_roleplay_agent.py): lightweight roleplay evaluator for greeting quality and banned opening phrases
+- [TEST.MD](TEST.MD): broader testing notes
 
 ## Still Worth Doing Next
 
