@@ -701,7 +701,11 @@ async def outbound_session(ctx):
         dossier_type=dossier.get("dossier_type", "optique"),
     )
 
+    # Disable noise cancellation for e2e test rooms — BVC filters TTS audio
+    _is_e2e_room = ctx.room.name.startswith("e2e-")
     def _nc_selector(params):
+        if _is_e2e_room:
+            return None
         kind = getattr(getattr(params, "participant", None), "kind", None)
         if kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
             return noise_cancellation.BVCTelephony()

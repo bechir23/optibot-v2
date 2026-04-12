@@ -54,7 +54,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
+import struct
 import sys
 import time
 import uuid
@@ -66,7 +68,11 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Loaded lazily inside main() so the module can be imported without side effects.
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 # ── Personas ─────────────────────────────────────────────────────────
 
@@ -144,7 +150,7 @@ REGLES:
 - Phrases courtes.
 - Premier tour: "Almerys bonjour."
 - Apres que l'opticien explique son motif (suivi de dossier), tu dis "je vous mets en relation avec le service tiers payant, ne quittez pas".
-- Apres ce transfert, tu changes de rôle: tu deviens Patrick, gestionnaire tiers payant.
+- Apres ce transfert, tu changes de role: tu deviens Patrick, gestionnaire tiers payant.
 - En tant que Patrick: "Patrick du service tiers payant, j'ecoute."
 - Patrick donne le statut: "le dossier est en attente, il manque la prescription medicale."
 - Tu testes que l'opticien gere bien le changement d'interlocuteur sans confondre les noms.
@@ -205,8 +211,23 @@ Reponds UNIQUEMENT en JSON:
  "no_loop": 0-1, "tool_correctness": 0-2, "no_hallucination": 0-1, "graceful_close": 0-1,
  "total": 0-10, "verdict": "PASS" or "FAIL", "notes": "brief explanation"}"""
 
+# Banned phrases — hard fail if agent says any of these in turn 1
+BANNED_FIRST_TURN = [
+    "un instant", "je verifie", "laissez-moi verifier",
+    "je regarde", "je reflechis", "je vais verifier",
+    "attendez", "patientez",
+]
 
-# ── Simulator agent ──────────────────────────────────────────────────
+
+# ── Audio glue: STT, LLM, TTS for the simulator ─────────────────────
+
+SAMPLE_RATE = 48000  # WebRTC native rate — LiveKit SFU expects this
+TTS_SAMPLE_RATE = 24000  # Cartesia produces best quality at 24kHz
+NUM_CHANNELS = 1
+SILENCE_THRESHOLD_SEC = 0.7  # agent must be silent this long before sim speaks
+FRAME_DURATION_MS = 20  # 20ms frames for LiveKit
+SAMPLES_PER_FRAME = SAMPLE_RATE * FRAME_DURATION_MS // 1000  # 480 samples
+
 
 @dataclass
 class TurnRecord:
@@ -228,17 +249,404 @@ class ScenarioResult:
     verdict: str = "PENDING"
 
 
-async def run_scenario(persona: MutuellePersona, max_turns: int = 12) -> ScenarioResult:
-    """Run one dual-agent scenario in a real LiveKit room.
+class SimulatorAudioPipeline:
+    """STT → LLM → TTS pipeline for the mutuelle simulator side.
 
-    Returns the full ScenarioResult including transcript and judge score.
-
-    NOTE: This requires real LiveKit Cloud credentials in env. The simulator
-    side uses Deepgram + OpenAI + Cartesia directly via their REST APIs, not
-    through LiveKit, so it can run as a plain Python process alongside the
-    deployed agent.
+    Subscribes to the production agent's audio, transcribes it via Deepgram,
+    generates a response via OpenAI, synthesizes via Cartesia, and publishes
+    the PCM back into the LiveKit room via AudioSource.
     """
-    # Lazy imports so the module can be parsed without livekit installed
+
+    def __init__(
+        self,
+        persona: MutuellePersona,
+        audio_source,  # rtc.AudioSource
+        result: ScenarioResult,
+        max_turns: int = 12,
+    ):
+        self.persona = persona
+        self.audio_source = audio_source
+        self.result = result
+        self.max_turns = max_turns
+
+        self._turn_count = 0
+        self._conversation: list[dict[str, str]] = [
+            {"role": "system", "content": persona.system_prompt},
+        ]
+        self._agent_transcript_buffer: list[str] = []
+        self._last_agent_audio_at = time.monotonic()
+        self._sim_speaking = False
+        self._done = asyncio.Event()
+        self._agent_utterance_ended = asyncio.Event()  # set when Deepgram says UtteranceEnd
+        self._agent_speaking = False  # true while Deepgram detects speech
+
+        # Deepgram streaming STT state
+        self._dg_connection = None
+        self._current_utterance_parts: list[str] = []
+
+        # API keys
+        self._deepgram_key = os.environ.get("DEEPGRAM_API_KEY", "")
+        self._openai_key = os.environ.get("OPENAI_API_KEY", "")
+        self._cartesia_key = os.environ.get("CARTESIA_API_KEY", "")
+
+    async def start_stt(self, audio_track):
+        """Start consuming the agent's audio track and transcribing via Deepgram.
+
+        Uses deepgram-sdk 6.x async websocket API:
+        - client.listen.v1.connect(...) -> async context manager
+        - socket.send_media(bytes) to send PCM
+        - async for msg in socket to receive transcripts
+        """
+        from livekit import rtc
+        from deepgram import AsyncDeepgramClient
+
+        if not self._deepgram_key:
+            raise RuntimeError("DEEPGRAM_API_KEY not set")
+
+        dg_client = AsyncDeepgramClient(api_key=self._deepgram_key)
+
+        async with dg_client.listen.v1.connect(
+            model="nova-3",
+            language="fr",
+            encoding="linear16",
+            sample_rate=str(SAMPLE_RATE),
+            channels=str(NUM_CHANNELS),
+            interim_results="true",
+            utterance_end_ms="1000",
+            vad_events="true",
+            punctuate="true",
+        ) as dg_socket:
+            self._dg_connection = dg_socket
+            logger.info("[%s] Deepgram STT connected", self.persona.key)
+
+            # Start receiving transcription events in background
+            recv_task = asyncio.create_task(self._process_dg_events(dg_socket))
+
+            # Pipe audio frames from LiveKit to Deepgram
+            audio_stream = rtc.AudioStream(
+                audio_track,
+                sample_rate=SAMPLE_RATE,
+                num_channels=NUM_CHANNELS,
+            )
+            async for frame_event in audio_stream:
+                if self._done.is_set():
+                    break
+                frame = frame_event.frame
+                self._last_agent_audio_at = time.monotonic()
+                # frame.data is int16 PCM memoryview — send raw bytes to Deepgram
+                pcm_bytes = bytes(frame.data)
+                try:
+                    await dg_socket.send_media(pcm_bytes)
+                except Exception:
+                    break
+
+            try:
+                await dg_socket.send_finalize()
+            except Exception:
+                pass
+
+            recv_task.cancel()
+            try:
+                await recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _process_dg_events(self, dg_socket):
+        """Process Deepgram transcription events from the websocket."""
+        try:
+            async for msg in dg_socket:
+                if self._done.is_set():
+                    break
+                # msg type is checked via .type attribute (string)
+                msg_type = getattr(msg, "type", None)
+                if isinstance(msg_type, str):
+                    type_str = msg_type
+                else:
+                    type_str = str(msg_type) if msg_type else ""
+
+                if "Results" in type_str:
+                    if msg.channel and msg.channel.alternatives:
+                        transcript = msg.channel.alternatives[0].transcript
+                        if transcript and transcript.strip():
+                            self._agent_speaking = True
+                            self._agent_utterance_ended.clear()
+                            is_final = msg.is_final
+                            if is_final:
+                                self._current_utterance_parts.append(transcript.strip())
+                                logger.debug("[%s] STT final: %s", self.persona.key, transcript.strip())
+                elif "SpeechStarted" in type_str:
+                    self._agent_speaking = True
+                    self._agent_utterance_ended.clear()
+                elif "UtteranceEnd" in type_str:
+                    self._agent_speaking = False
+                    # Agent finished speaking — flush accumulated transcript
+                    if self._current_utterance_parts:
+                        full_text = " ".join(self._current_utterance_parts)
+                        self._current_utterance_parts.clear()
+                        self._agent_transcript_buffer.append(full_text)
+                        self.result.turns.append(TurnRecord(
+                            speaker="agent",
+                            text=full_text,
+                            ts=time.monotonic(),
+                        ))
+                        logger.info("[%s] Agent said: %s", self.persona.key, full_text)
+                    # Signal that agent is done speaking — sim can now respond
+                    self._agent_utterance_ended.set()
+        except Exception as e:
+            if not self._done.is_set():
+                logger.warning("[%s] DG event loop error: %s", self.persona.key, e)
+
+    async def run_conversation_loop(self):
+        """Main conversation loop: wait for agent silence, then respond."""
+        import openai
+        from cartesia import AsyncCartesia
+        from livekit import rtc
+
+        if not self._openai_key:
+            raise RuntimeError("OPENAI_API_KEY not set")
+        if not self._cartesia_key:
+            raise RuntimeError("CARTESIA_API_KEY not set")
+
+        oai = openai.AsyncOpenAI(api_key=self._openai_key)
+        cartesia = AsyncCartesia(api_key=self._cartesia_key)
+
+        # Wait for agent to say something first (up to 20s)
+        wait_start = time.monotonic()
+        while not self._agent_transcript_buffer and time.monotonic() - wait_start < 20:
+            await asyncio.sleep(0.3)
+
+        if not self._agent_transcript_buffer:
+            logger.warning("[%s] Agent never spoke after 20s — simulator generating first turn", self.persona.key)
+
+        while self._turn_count < self.max_turns and not self._done.is_set():
+            # Wait for silence (agent stopped speaking)
+            await self._wait_for_agent_silence()
+
+            if self._done.is_set():
+                break
+
+            # Collect what agent said since last sim turn
+            agent_text = " ".join(self._agent_transcript_buffer)
+            self._agent_transcript_buffer.clear()
+
+            if agent_text.strip():
+                self._conversation.append({"role": "user", "content": agent_text})
+
+            # Check banned phrases on agent's first turn
+            if self._turn_count == 0 and agent_text:
+                lower = agent_text.lower()
+                for banned in BANNED_FIRST_TURN:
+                    if banned in lower:
+                        logger.warning("[%s] BANNED PHRASE in first turn: '%s'", self.persona.key, banned)
+                        self.result.verdict = "FAIL"
+                        self.result.judge_score = {"banned_phrase_detected": banned, "total": 0}
+
+            # Generate simulator response via OpenAI
+            try:
+                response = await oai.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=self._conversation,
+                    max_tokens=150,
+                    temperature=0.7,
+                )
+                sim_text = response.choices[0].message.content.strip()
+            except Exception as e:
+                logger.error("[%s] OpenAI error: %s", self.persona.key, e)
+                sim_text = "Excusez-moi, pouvez-vous repeter?"
+
+            if not sim_text:
+                continue
+
+            self._conversation.append({"role": "assistant", "content": sim_text})
+            self.result.turns.append(TurnRecord(
+                speaker="simulator",
+                text=sim_text,
+                ts=time.monotonic(),
+            ))
+            logger.info("[%s] Simulator says: %s", self.persona.key, sim_text)
+
+            # Check if conversation should end
+            if self._is_goodbye(sim_text):
+                logger.info("[%s] Detected goodbye — ending conversation", self.persona.key)
+                # Still synthesize the goodbye
+                await self._synthesize_and_publish(cartesia, sim_text)
+                self._turn_count += 1
+                await asyncio.sleep(3)  # let agent respond to goodbye
+                break
+
+            # Synthesize via Cartesia TTS and publish audio
+            self._sim_speaking = True
+            await self._synthesize_and_publish(cartesia, sim_text)
+            self._sim_speaking = False
+
+            self._turn_count += 1
+
+            # Brief pause after speaking to let agent process
+            await asyncio.sleep(0.5)
+
+        self._done.set()
+
+    async def _wait_for_agent_silence(self):
+        """Wait for the agent to finish speaking (Deepgram UtteranceEnd + quiet period).
+
+        The agent may produce multi-segment greetings (split by Deepgram into
+        multiple UtteranceEnd events). We wait for UtteranceEnd, then an extra
+        2s of quiet to make sure the agent won't continue.
+        """
+        while not self._done.is_set():
+            try:
+                await asyncio.wait_for(self._agent_utterance_ended.wait(), timeout=1.0)
+                self._agent_utterance_ended.clear()
+                # Wait 2s to see if agent continues speaking
+                await asyncio.sleep(2.0)
+                if not self._agent_speaking and not self._agent_utterance_ended.is_set():
+                    return
+                # Agent spoke again — keep waiting
+            except asyncio.TimeoutError:
+                continue
+
+    async def _synthesize_and_publish(self, cartesia_client, text: str):
+        """Stream text through Cartesia TTS and publish PCM to LiveKit AudioSource."""
+        from livekit import rtc
+
+        try:
+            logger.info("[%s] Starting Cartesia TTS (HTTP) for: %.60s...", self.persona.key, text)
+            import struct as _struct
+
+            # Use HTTP API (not WebSocket) — WS produces near-silent output (Cartesia SDK bug)
+            resp = await cartesia_client.tts.generate(
+                model_id="sonic-3",
+                transcript=text,
+                voice={"mode": "id", "id": self.persona.voice_id},
+                output_format={
+                    "container": "raw",
+                    "encoding": "pcm_s16le",
+                    "sample_rate": TTS_SAMPLE_RATE,
+                },
+                language="fr",
+            )
+            audio_bytes = await resp.read()
+
+            n_samples = len(audio_bytes) // 2
+            int16_samples_24k = _struct.unpack(f'<{n_samples}h', audio_bytes)
+            max_amp = max(abs(s) for s in int16_samples_24k[:2000])
+            logger.info("[%s] TTS: %d samples at 24kHz, max_amplitude=%d", self.persona.key, n_samples, max_amp)
+
+            # 2x upsample: duplicate each sample (24kHz -> 48kHz)
+            int16_samples_48k = []
+            for s in int16_samples_24k:
+                int16_samples_48k.append(s)
+                int16_samples_48k.append(s)
+
+            # Pack and publish in 20ms frames
+            pcm_bytes = _struct.pack(f'<{len(int16_samples_48k)}h', *int16_samples_48k)
+            offset = 0
+            bytes_per_frame = SAMPLES_PER_FRAME * NUM_CHANNELS * 2
+
+            while offset + bytes_per_frame <= len(pcm_bytes):
+                frame = rtc.AudioFrame(
+                    data=pcm_bytes[offset:offset + bytes_per_frame],
+                    sample_rate=SAMPLE_RATE,
+                    num_channels=NUM_CHANNELS,
+                    samples_per_channel=SAMPLES_PER_FRAME,
+                )
+                await self.audio_source.capture_frame(frame)
+                offset += bytes_per_frame
+
+            await self.audio_source.wait_for_playout()
+            duration_sec = len(int16_samples_48k) / SAMPLE_RATE
+            logger.info("[%s] TTS done: %.1fs audio published", self.persona.key, duration_sec)
+
+        except Exception as e:
+            logger.error("[%s] TTS synthesis error: %s", self.persona.key, e, exc_info=True)
+
+    @staticmethod
+    def _is_goodbye(text: str) -> bool:
+        lower = text.lower()
+        goodbye_markers = [
+            "bonne journee", "au revoir", "bonne continuation",
+            "a bientot", "merci et bonne", "bonne fin de journee",
+        ]
+        return any(m in lower for m in goodbye_markers)
+
+
+async def run_judge(result: ScenarioResult) -> dict[str, Any]:
+    """Run LLM judge on the transcript to score agent performance."""
+    import openai
+
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    if not openai_key:
+        return {"error": "OPENAI_API_KEY not set", "total": 0, "verdict": "ERROR"}
+
+    oai = openai.AsyncOpenAI(api_key=openai_key)
+
+    # Format transcript for judge
+    transcript_lines = []
+    for turn in result.turns:
+        if turn.speaker == "system":
+            continue
+        label = "ASSISTANT" if turn.speaker == "agent" else "MUTUELLE"
+        transcript_lines.append(f"{label}: {turn.text}")
+
+    transcript_text = "\n".join(transcript_lines)
+
+    try:
+        response = await oai.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": JUDGE_RUBRIC},
+                {"role": "user", "content": f"Scenario: {result.scenario_key}\nMutuelle: {result.mutuelle}\n\nTRANSCRIPT:\n{transcript_text}"},
+            ],
+            max_tokens=500,
+            temperature=0.0,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Parse JSON from response (handle markdown code blocks)
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw)
+    except Exception as e:
+        logger.error("Judge scoring failed: %s", e)
+        return {"error": str(e), "total": 0, "verdict": "ERROR"}
+
+
+def _rule_based_precheck(result: ScenarioResult) -> dict[str, Any] | None:
+    """Fast pre-check for banned phrases and loops. Returns failure dict or None."""
+    agent_turns = [t for t in result.turns if t.speaker == "agent"]
+
+    if not agent_turns:
+        return {"error": "agent_never_spoke", "total": 0, "verdict": "FAIL"}
+
+    # Check banned phrases in first agent turn
+    first_turn = agent_turns[0].text.lower()
+    for banned in BANNED_FIRST_TURN:
+        if banned in first_turn:
+            return {
+                "hard_fail": "banned_phrase_first_turn",
+                "phrase": banned,
+                "total": 0,
+                "verdict": "FAIL",
+            }
+
+    # Check for consecutive repeated phrases
+    prev_text = ""
+    for turn in agent_turns:
+        if turn.text == prev_text and turn.text.strip():
+            return {
+                "hard_fail": "consecutive_repeat",
+                "repeated": turn.text,
+                "total": 0,
+                "verdict": "FAIL",
+            }
+        prev_text = turn.text
+
+    return None
+
+
+async def run_scenario(persona: MutuellePersona, max_turns: int = 12) -> ScenarioResult:
+    """Run one dual-agent scenario in a real LiveKit room."""
     from livekit import api, rtc
     from livekit.api import AccessToken, VideoGrants
 
@@ -265,6 +673,7 @@ async def run_scenario(persona: MutuellePersona, max_turns: int = 12) -> Scenari
         "tenant_id": "e2e-test",
         "scenario": persona.key,
         "test_mode": True,
+        "local_loopback": True,  # routes to outbound_session in unified_session()
         "dossier": {
             "patient_name": "Jean Dupont",
             "patient_dob": "15/03/1985",
@@ -283,7 +692,7 @@ async def run_scenario(persona: MutuellePersona, max_turns: int = 12) -> Scenari
                 metadata=metadata,
             )
         )
-        print(f"[{persona.key}] Dispatched agent '{agent_name}' to room '{room_name}'")
+        logger.info("[%s] Dispatched agent '%s' to room '%s'", persona.key, agent_name, room_name)
     except Exception as exc:
         result.error = f"agent_dispatch_failed: {exc}"
         await lk_api.aclose()
@@ -307,45 +716,74 @@ async def run_scenario(persona: MutuellePersona, max_turns: int = 12) -> Scenari
     room = rtc.Room()
 
     # Audio source for publishing simulator's TTS output
-    sample_rate = 24000
-    audio_source = rtc.AudioSource(sample_rate=sample_rate, num_channels=1)
+    audio_source = rtc.AudioSource(sample_rate=SAMPLE_RATE, num_channels=NUM_CHANNELS)
     sim_track = rtc.LocalAudioTrack.create_audio_track("sim-mic", audio_source)
 
-    # Track the agent's transcribed speech to feed to LLM
-    agent_transcript_buffer: list[str] = []
-    agent_speaking = asyncio.Event()
-    agent_silence_event = asyncio.Event()
-    agent_silence_event.set()
-    last_agent_audio_at = [time.monotonic()]
+    # Create the audio pipeline
+    pipeline = SimulatorAudioPipeline(
+        persona=persona,
+        audio_source=audio_source,
+        result=result,
+        max_turns=max_turns,
+    )
+
+    stt_task = None
+    conversation_task = None
+    silence_fill_task = None
+
+    async def _continuous_silence_fill():
+        """Publish silence frames continuously to keep the audio track active.
+
+        WebRTC/LiveKit tracks are considered "active" only when frames are being
+        published. If we only publish during TTS, the agent's STT never sees the
+        track as having audio, so it never processes speech from it.
+        """
+        silence_frame = rtc.AudioFrame(
+            data=b'\x00' * (SAMPLES_PER_FRAME * NUM_CHANNELS * 2),
+            sample_rate=SAMPLE_RATE,
+            num_channels=NUM_CHANNELS,
+            samples_per_channel=SAMPLES_PER_FRAME,
+        )
+        while not pipeline._done.is_set():
+            if not pipeline._sim_speaking:
+                try:
+                    await audio_source.capture_frame(silence_frame)
+                except Exception:
+                    break
+            await asyncio.sleep(FRAME_DURATION_MS / 1000.0)
+
+    # Subscribe to agent's transcription stream to see what IT heard from the sim
+    async def _on_transcription(reader, participant_identity):
+        try:
+            text = await reader.read_all()
+            if text.strip():
+                logger.info("[%s] AGENT HEARD (transcription): %s", persona.key, text[:200])
+        except Exception as e:
+            logger.debug("[%s] Transcription stream error: %s", persona.key, e)
+
+    room.register_text_stream_handler("lk.transcription", _on_transcription)
 
     @room.on("track_subscribed")
     def _on_track_subscribed(track, publication, participant):
-        if track.kind == rtc.TrackKind.KIND_AUDIO and participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT:
-            print(f"[{persona.key}] Subscribed to agent audio track from {participant.identity}")
-            asyncio.create_task(_consume_agent_audio(track))
-
-    async def _consume_agent_audio(track):
-        # Simplified: count audio frames as a proxy for "agent is speaking".
-        # Real STT integration is in transcribe_agent_audio() below.
-        async for _frame in rtc.AudioStream(track):
-            last_agent_audio_at[0] = time.monotonic()
-            agent_speaking.set()
-            agent_silence_event.clear()
-
-    async def _silence_watcher():
-        while True:
-            await asyncio.sleep(0.2)
-            elapsed = time.monotonic() - last_agent_audio_at[0]
-            if elapsed > 0.7:  # 700ms silence threshold
-                agent_silence_event.set()
+        nonlocal stt_task
+        if (
+            track.kind == rtc.TrackKind.KIND_AUDIO
+            and participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+        ):
+            logger.info("[%s] Subscribed to agent audio from %s", persona.key, participant.identity)
+            stt_task = asyncio.create_task(pipeline.start_stt(track))
 
     try:
-        print(f"[{persona.key}] Connecting simulator to room...")
+        logger.info("[%s] Connecting simulator to room...", persona.key)
         await room.connect(livekit_url, sim_token)
-        await room.local_participant.publish_track(sim_track)
-        print(f"[{persona.key}] Simulator connected as '{sim_identity}'")
+        # Publish as MICROPHONE source — agent only subscribes to microphone tracks
+        publish_opts = rtc.TrackPublishOptions()
+        publish_opts.source = rtc.TrackSource.SOURCE_MICROPHONE
+        await room.local_participant.publish_track(sim_track, publish_opts)
+        logger.info("[%s] Simulator connected as '%s'", persona.key, sim_identity)
 
-        silence_task = asyncio.create_task(_silence_watcher())
+        # Start publishing silence frames immediately to keep the track active
+        silence_fill_task = asyncio.create_task(_continuous_silence_fill())
 
         # Wait for agent to join (up to 30s)
         agent_present = False
@@ -363,43 +801,56 @@ async def run_scenario(persona: MutuellePersona, max_turns: int = 12) -> Scenari
             result.error = "agent_never_joined"
             return result
 
-        print(f"[{persona.key}] Agent joined. Starting conversation loop ({max_turns} turn cap)")
+        logger.info("[%s] Agent joined. Starting conversation loop (%d turn cap)", persona.key, max_turns)
 
-        # NOTE: This implementation is the SCAFFOLD only.
-        # The full STT->LLM->TTS loop for the simulator side requires:
-        #   1. Streaming Deepgram STT on the agent's audio track
-        #   2. Buffering transcript per silence-segment
-        #   3. Calling OpenAI with persona system prompt + transcript so far
-        #   4. Streaming Cartesia TTS output back into audio_source.capture_frame()
-        #
-        # That's ~300 lines of audio glue per provider. Marked TODO below
-        # so the file is runnable as scaffolding now and can be extended
-        # incrementally without blocking the broader test design.
-
-        # Scaffold loop: just verify agent is in the room and log transcript events.
         result.turns.append(TurnRecord(
             speaker="system",
             text=f"agent dispatched, room={room_name}, agent_present=True",
             ts=time.monotonic(),
         ))
 
-        # Wait briefly to capture a few seconds of agent behavior
-        await asyncio.sleep(10)
+        # Run conversation loop with a max duration timeout
+        scenario_start = time.monotonic()
+        max_duration = max_turns * 15  # ~15s per turn max
 
-        silence_task.cancel()
+        conversation_task = asyncio.create_task(pipeline.run_conversation_loop())
+
         try:
-            await silence_task
-        except asyncio.CancelledError:
-            pass
+            await asyncio.wait_for(conversation_task, timeout=max_duration)
+        except asyncio.TimeoutError:
+            logger.warning("[%s] Scenario timed out after %ds", persona.key, max_duration)
+            pipeline._done.set()
 
-        result.duration_sec = 10
-        result.verdict = "SCAFFOLD"  # Real scoring requires full STT/TTS loop
+        result.duration_sec = time.monotonic() - scenario_start
+
+        # Run rule-based precheck
+        precheck = _rule_based_precheck(result)
+        if precheck:
+            result.judge_score = precheck
+            result.verdict = "FAIL"
+            logger.warning("[%s] Rule-based precheck FAILED: %s", persona.key, precheck)
+        else:
+            # Run LLM judge
+            logger.info("[%s] Running LLM judge...", persona.key)
+            judge_result = await run_judge(result)
+            result.judge_score = judge_result
+            result.verdict = judge_result.get("verdict", "ERROR")
+            logger.info("[%s] Judge verdict: %s (score: %s)", persona.key, result.verdict, judge_result.get("total", "?"))
+
         return result
 
     except Exception as exc:
         result.error = f"simulator_failed: {type(exc).__name__}: {exc}"
         return result
     finally:
+        pipeline._done.set()
+        for task in [stt_task, conversation_task, silence_fill_task]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         try:
             await room.disconnect()
         except Exception:
@@ -418,6 +869,18 @@ def write_result(result: ScenarioResult) -> Path:
     return out_path
 
 
+def write_transcript_jsonl(result: ScenarioResult) -> Path:
+    """Write full transcript as JSONL for analysis."""
+    results_dir = PROJECT_ROOT / "tests" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = results_dir / f"{result.scenario_key}_{ts}_transcript.jsonl"
+    with open(out_path, "w", encoding="utf-8") as f:
+        for turn in result.turns:
+            f.write(json.dumps(asdict(turn), ensure_ascii=False) + "\n")
+    return out_path
+
+
 async def main_async(scenario_keys: list[str]) -> int:
     failures = 0
     for key in scenario_keys:
@@ -433,14 +896,22 @@ async def main_async(scenario_keys: list[str]) -> int:
             result = await run_scenario(persona, max_turns=persona.expected_turns)
         except Exception as exc:
             print(f"FATAL: {exc}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
             failures += 1
             continue
 
-        out_path = write_result(result)
-        print(f"\nResult written to: {out_path}")
-        print(f"Verdict: {result.verdict}")
+        result_path = write_result(result)
+        transcript_path = write_transcript_jsonl(result)
+        print(f"\nResult:     {result_path}")
+        print(f"Transcript: {transcript_path}")
+        print(f"Verdict:    {result.verdict}")
+        print(f"Turns:      {len([t for t in result.turns if t.speaker != 'system'])}")
+        print(f"Duration:   {result.duration_sec:.1f}s")
+        if result.judge_score:
+            print(f"Score:      {json.dumps(result.judge_score, indent=2, ensure_ascii=False)}")
         if result.error:
-            print(f"Error: {result.error}")
+            print(f"Error:      {result.error}")
             failures += 1
         elif result.verdict == "FAIL":
             failures += 1
@@ -457,6 +928,12 @@ def main() -> None:
         choices=list(PERSONAS.keys()) + ["all"],
         default="harmonie_happy_path",
         help="Which scenario to run, or 'all' for every persona",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=0,
+        help="Override max turns (0 = use persona default)",
     )
     args = parser.parse_args()
 
