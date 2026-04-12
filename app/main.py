@@ -748,29 +748,21 @@ async def outbound_session(ctx):
         turn_handling={
             "turn_detection": "stt",
             "endpointing": {
-                "mode": "dynamic",   # adapts to conversation rhythm
-                "min_delay": 0.0,    # Deepgram handles endpointing (LiveKit #4325)
-                "max_delay": 3.0,    # cap for slow speakers
+                "mode": "dynamic",
+                "min_delay": settings.endpointing_min_delay_sec,
+                "max_delay": settings.endpointing_max_delay_sec,
             },
             "interruption": {
                 "enabled": True,
-                "mode": "adaptive",  # context-aware barge-in detection
-                "resume_false_interruption": True,  # resume after false interrupt
-                "false_interruption_timeout": 1.5,
-                "min_words": 2,      # require 2+ words to interrupt
+                "mode": "adaptive",
+                "resume_false_interruption": True,
+                "false_interruption_timeout": settings.interruption_false_timeout_sec,
+                "min_words": settings.interruption_min_words,
             },
         },
-        # Disable user_away_timeout — we have custom HoldDetector;
-        # default 15s triggers false "away" during hold (docs gap)
         user_away_timeout=None,
-        # Default max_tool_steps=3 is too low for 15+ tools;
-        # agent may need: give_patient_name -> give_dossier_reference ->
-        # ask_reimbursement_status -> extract_information in sequence
-        max_tool_steps=8,
-        # Add a small natural pause between consecutive agent utterances.
-        # Default 0.0 produces rapid-fire responses that sound robotic on
-        # telephony. 300ms matches human conversational pacing.
-        min_consecutive_speech_delay=0.3,
+        max_tool_steps=settings.max_tool_steps,
+        min_consecutive_speech_delay=settings.min_consecutive_speech_delay_sec,
         preemptive_generation=True,
     )
 
@@ -785,7 +777,7 @@ async def outbound_session(ctx):
                     transcription_enabled=True,
                     # Use 24kHz for higher quality TTS output;
                     # helps reduce artifacts during SIP transcoding (LiveKit SIP #608)
-                    audio_sample_rate=24000,
+                    audio_sample_rate=settings.audio_sample_rate_hz,
                 ),
                 room_options=room_io.RoomOptions(
                     audio_input=room_io.AudioInputOptions(
@@ -1094,20 +1086,20 @@ async def inbound_session(ctx):
             "turn_detection": "stt",
             "endpointing": {
                 "mode": "dynamic",
-                "min_delay": 0.0,
-                "max_delay": 3.0,
+                "min_delay": settings.endpointing_min_delay_sec,
+                "max_delay": settings.endpointing_max_delay_sec,
             },
             "interruption": {
                 "enabled": True,
                 "mode": "adaptive",
                 "resume_false_interruption": True,
-                "false_interruption_timeout": 1.5,
-                "min_words": 2,
+                "false_interruption_timeout": settings.interruption_false_timeout_sec,
+                "min_words": settings.interruption_min_words,
             },
         },
         user_away_timeout=None,
-        max_tool_steps=8,
-        min_consecutive_speech_delay=0.3,
+        max_tool_steps=settings.max_tool_steps,
+        min_consecutive_speech_delay=settings.min_consecutive_speech_delay_sec,
         preemptive_generation=True,
     )
 
@@ -1116,7 +1108,7 @@ async def inbound_session(ctx):
         agent=agent,
         room_output_options=room_io.RoomOutputOptions(
             transcription_enabled=True,
-            audio_sample_rate=24000,
+            audio_sample_rate=settings.audio_sample_rate_hz,
         ),
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(

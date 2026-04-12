@@ -423,6 +423,38 @@ class OutboundCallerAgent(Agent):
             except Exception as e:
                 logger.error("Failed to store RAG summary: %s", e)
 
+        # Webhook: POST call outcome to external URL (CRM, n8n, etc.)
+        # Fire-and-forget — don't block finalization on webhook delivery.
+        from app.config.settings import Settings
+        _settings = Settings()
+        if _settings.webhook_url:
+            async def _post_webhook():
+                try:
+                    import httpx
+                    payload = {
+                        "event": "call_completed",
+                        "call_id": self._call_id,
+                        "tenant_id": self._tenant_id,
+                        "mutuelle": self._mutuelle,
+                        "outcome": outcome,
+                        "summary": summary,
+                        "duration_seconds": round(duration_seconds, 1),
+                        "tools_called": self._tools_called,
+                        "extracted": {
+                            k: v for k, v in self._extracted.items()
+                            if k not in ("nir",)  # PII exclusion
+                        },
+                    }
+                    async with httpx.AsyncClient(timeout=_settings.webhook_timeout_sec) as client:
+                        resp = await client.post(_settings.webhook_url, json=payload)
+                        if resp.status_code >= 400:
+                            logger.warning("Webhook POST failed: %d %s", resp.status_code, resp.text[:200])
+                        else:
+                            logger.info("Webhook POST succeeded: %d", resp.status_code)
+                except Exception as exc:
+                    logger.warning("Webhook delivery failed: %s", exc)
+            asyncio.create_task(_post_webhook())
+
     # ── Patient info tools (PII served only on demand) ────
 
     @function_tool()

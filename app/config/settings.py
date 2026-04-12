@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     max_tool_steps: int = 8  # default 3 too low for 15+ tools
     cartesia_ws_timeout_warning_sec: float = 60.0  # Cartesia WS dies at ~60s
 
+    # ── Webhooks ─────────────────────────────────────
+    webhook_url: str = ""  # POST call outcomes here (empty = disabled)
+    webhook_timeout_sec: float = 10.0
+
     # ── Hosting ──────────────────────────────────────
     host: str = "0.0.0.0"
     port: int = 8080
