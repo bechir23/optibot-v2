@@ -1,133 +1,131 @@
 # OptiBot v2
 
-Production-oriented French voice agent for optician telephony, built on LiveKit.
+Production French voice agent for optician telephony, built on LiveKit.
 
-## What This Repo Is
+## Architecture
 
-OptiBot handles:
-- outbound reimbursement follow-up calls to mutuelles
-- inbound receptionist-style calls
-- IVR navigation with DTMF
-- hold detection and silence suppression
-- French STT/TTS with telephony-focused tuning
-- per-call state persistence and crash recovery checkpoints
-
-The runtime path is currently:
-
-`LiveKit AgentSession -> Deepgram STT -> LLM -> Cartesia TTS -> LiveKit SIP / room transport`
-
-## Current Source Of Truth
-
-Use these files as the current source of truth:
-- [docs/telnyx_configuration_runbook.md](docs/telnyx_configuration_runbook.md)
-- [docs/realtime_production_item_list.md](docs/realtime_production_item_list.md)
-- [app/main.py](app/main.py)
-- [app/agents/outbound_caller.py](app/agents/outbound_caller.py)
-
-[claude_lastchanges.md](claude_lastchanges.md) is useful as historical session context, but it mixes older sandbox notes with newer work and should not be treated as the canonical current state by itself.
-
-## Important Telephony Distinction
-
-There are two different IDs involved in the Telnyx + LiveKit setup:
-
-- `TELNYX_SIP_CONNECTION_ID`: the SIP Connection created in the Telnyx portal
-- `LIVEKIT_SIP_OUTBOUND_TRUNK_ID`: the outbound SIP trunk created in LiveKit
-
-The app dials through the **LiveKit** outbound trunk ID. A Telnyx SIP Connection alone is not enough for outbound calls from this repo.
-
-Backward compatibility:
-- older code and env files may still use `TELNYX_SIP_TRUNK_ID`
-- in this repo that old variable must still contain the **LiveKit** trunk ID, not the Telnyx portal ID
-
-## Key Runtime Fixes Already Landed
-
-- deterministic greeting after participant join, so the agent does not speak to an empty room
-- inbound-specific greeting/persona instead of reusing the outbound reimbursement persona
-- hold detection wired into turn suppression with `StopResponse`
-- ban on looping wait phrases like `un instant`, `je verifie`, `je regarde` as opening behavior
-- graceful end-call / voicemail hangup behavior
-- per-turn Redis checkpoints and structured call session state
-- IVR handoff context preservation
-- STT correction hardening to avoid false mutuelle substitutions
-- visible persistence failure logging and retry-based Supabase writes
-- French voicemail trigger phrases for the LLM path
-
-## Environment
-
-Copy [`.env.example`](.env.example) to `.env` and fill in the real values.
-
-Most important variables:
-- `LIVEKIT_URL`
-- `LIVEKIT_API_KEY`
-- `LIVEKIT_API_SECRET`
-- `OPENAI_API_KEY`
-- `DEEPGRAM_API_KEY`
-- `CARTESIA_API_KEY`
-- `LIVEKIT_SIP_OUTBOUND_TRUNK_ID`
-- `TELNYX_USERNAME`
-- `SUPABASE_URL`
-- `SUPABASE_KEY`
-- `REDIS_URL`
-
-## Running
-
-Start the app locally:
-
-```powershell
-python run_livekit.py
+```
+Deepgram Nova-3 (STT, fr) -> OpenAI gpt-4.1-mini (LLM) -> Cartesia Sonic-3 (TTS, fr)
+                                    |
+                          LiveKit AgentSession[CallSessionState]
+                          (WebRTC / SIP outbound via Telnyx)
 ```
 
-Run the unit test suite:
+Two agent types:
+- **OutboundCallerAgent** (17 tools) — follows up mutuelles on reimbursements
+- **IVRNavigatorAgent** (4 tools) — navigates phone menus with DTMF
 
-```powershell
+## What Works
+
+- 134 unit tests passing
+- French TTS/STT with domain keyterm prompting (100 terms)
+- Hold detection v2 (two-tier, cold transfer, voicemail-dump detection)
+- AMD tuned for French (human_speech_max_ms=2000)
+- Per-turn Redis checkpoint for crash recovery
+- Max call duration watchdog (default 10 min)
+- All finalization paths protected (7 exit paths covered)
+- Webhook dispatcher for CRM/n8n integration
+- 32 call scenario test library with French phrases
+- 4 mutuelle personas for dual-agent testing
+
+## Quick Start
+
+```bash
+# Install
+pip install -e ".[dev]"
+
+# Configure
+cp .env.example .env
+# Fill in: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET,
+# OPENAI_API_KEY, DEEPGRAM_API_KEY, CARTESIA_API_KEY
+
+# Run tests
 python -m pytest -q
+
+# Deploy to LiveKit Cloud
+lk agent deploy --silent --secrets-file .env --ignore-empty-secrets .
+
+# Create Telnyx SIP trunk (run locally with credentials)
+python scripts/telnyx_setup.py
 ```
 
-Create a real LiveKit cloud probe room:
+## Testing
 
-```powershell
+```bash
+# Unit tests (134 passing)
+python -m pytest -q
+
+# LiveKit room probe (agent presence check)
 python tests/e2e_livekit_room_probe.py --wait-seconds 20
-```
 
-Run the real provider smoke:
-
-```powershell
+# Provider smoke (TTS/STT/AMD/hold)
 python tests/e2e_real_audio.py
-```
 
-Run the text-mode roleplay evaluator:
-
-```powershell
-python tests/e2e_roleplay_agent.py --scenario inbound_greeting
+# Text-mode roleplay
 python tests/e2e_roleplay_agent.py --scenario outbound_mutuelle
+
+# Dual-agent real room (scaffold — audio glue TODO)
+python tests/e2e_dual_real_room.py --scenario harmonie_happy_path
 ```
 
-## Telnyx Setup
+## Key Documentation
 
-Follow [docs/telnyx_configuration_runbook.md](docs/telnyx_configuration_runbook.md).
+| Doc | Purpose |
+|-----|---------|
+| [docs/ultraplan_resume.md](docs/ultraplan_resume.md) | **START HERE** — complete status + next session guide |
+| [docs/production_resume.md](docs/production_resume.md) | Full production status with research findings |
+| [docs/test_scenarios.md](docs/test_scenarios.md) | 32 call scenarios with French phrases + assertions |
+| [docs/telnyx_configuration_runbook.md](docs/telnyx_configuration_runbook.md) | Telnyx portal + LiveKit trunk setup |
+| [docs/dual_agent_testing.md](docs/dual_agent_testing.md) | Dual-agent test architecture |
 
-If you already changed the Telnyx portal locally:
-- anchorsite switched to Frankfurt
-- SIP Connection created
-- Outbound Voice Profile created
+## Telephony Setup
 
-you still need to verify:
-- the SIP Connection is fully completed
-- outbound auth credentials are recorded
-- codec choice matches the IVR/DTMF requirement
-- the Outbound Voice Profile is attached
-- the LiveKit outbound trunk exists and its ID is in `.env`
+Two IDs are involved:
+- `TELNYX_SIP_CONNECTION_ID` — the SIP Connection in Telnyx portal
+- `LIVEKIT_SIP_OUTBOUND_TRUNK_ID` — the outbound trunk in LiveKit
 
-## Current Validation Helpers
+The app dials through the LiveKit trunk. Create it with:
+```bash
+python scripts/telnyx_setup.py
+```
 
-- [tests/e2e_livekit_room_probe.py](tests/e2e_livekit_room_probe.py): proves the deployed agent is actually present in a fresh room
-- [tests/e2e_real_audio.py](tests/e2e_real_audio.py): exercises TTS, STT, AMD, hold logic, and text-mode agent flow
-- [tests/e2e_roleplay_agent.py](tests/e2e_roleplay_agent.py): lightweight roleplay evaluator for greeting quality and banned opening phrases
-- [TEST.MD](TEST.MD): broader testing notes
+Critical Telnyx settings:
+- Anchorsite: Frankfurt or Paris (EU latency)
+- Codecs: G.711U + G.711A (NOT G.722 — breaks DTMF for IVR)
+- `X-Telnyx-Username` in `headers` field (NOT `headers_to_attributes`)
+- `destination_country="FR"` for LiveKit region pinning
 
-## Still Worth Doing Next
+## Remaining Work (Prioritized)
 
-- add a dedicated scripted evaluator for live-room roleplay against our agent
-- separate local HTTP health checks from cloud-agent smoke checks
-- benchmark real French pacing/prosody across voices
-- decide whether to stay LiveKit-SIP-only or add a Telnyx Call Control bridge for the hardest PSTN edge cases
+### Must Do
+1. Complete dual-room test audio glue (~300 lines: Deepgram streaming + OpenAI persona + Cartesia TTS)
+2. Run telnyx_setup.py on real credentials
+3. Port v1 domain prompt (14 scenarios, escalation strategy, tiers payant knowledge)
+4. Add call recording (LiveKit Egress + S3)
+
+### Should Do
+5. Add cost tracking per call
+6. Port auto-scheduler from v1 (follow-up queue, smart slot selection)
+7. Add FallbackAdapter for multi-provider STT/TTS
+8. Evaluate telnyx-livekit-plugin for co-located inference (sub-200ms)
+
+### Nice to Have
+9. Port discrete action space from v1 (anti-hallucination architecture)
+10. Static KB ingestion for tiers payant rules (PDF/DOCX)
+11. Notification system (n8n webhooks, SMS)
+12. Optimum Live ERP connector
+
+## Open LiveKit Issues
+
+| Issue | Impact | Status |
+|-------|--------|--------|
+| [#4026](https://github.com/livekit/agents/issues/4026) SIP audio fading | Words fade on T-Mobile/VoLTE | OPEN |
+| [#3841](https://github.com/livekit/agents/issues/3841) Silent worker death | Deepgram+Cartesia workers die | OPEN |
+| [#608](https://github.com/livekit/sip/issues/608) SIP transcoding artifacts | Audio chunks at boundaries | PRs merged |
+| [#642](https://github.com/livekit/sip/issues/642) BYE routing loop | 49s dead audio on Telnyx inbound | OPEN |
+| [#353](https://github.com/livekit/sip/issues/353) max_call_duration bugged | Controls ring, not call time | OPEN |
+
+## Repos
+
+- Personal: https://github.com/bechir23/optibot-v2
+- Team: https://github.com/OptiBot-Team/optibot (branch: livekit-rewrite)
