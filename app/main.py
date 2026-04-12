@@ -964,6 +964,23 @@ async def outbound_session(ctx):
 
     ctx.add_shutdown_callback(_finalize_on_shutdown)
 
+    # Max call duration safety net — auto-shutdown after settings.max_call_duration_sec.
+    # This handles the case where:
+    # - Both sides go silent (dead line) and no hold is detected
+    # - SIP participant drops without BYE (network failure)
+    # - Agent gets stuck in a loop
+    # Without this, a dead session burns compute indefinitely because
+    # user_away_timeout=None (disabled for our custom hold detector).
+    async def _max_duration_watchdog():
+        await asyncio.sleep(settings.max_call_duration_sec)
+        logger.warning(
+            "Max call duration reached (%ds) — forcing shutdown",
+            settings.max_call_duration_sec,
+        )
+        ctx.shutdown(reason="max_duration_exceeded")
+
+    asyncio.create_task(_max_duration_watchdog())
+
 
 async def inbound_session(ctx):
     """Handle one inbound call session (receptionist mode).
@@ -1141,6 +1158,17 @@ async def inbound_session(ctx):
             logger.exception("Inbound finalization failed: %s", e)
 
     ctx.add_shutdown_callback(_finalize_inbound_on_shutdown)
+
+    # Max call duration watchdog (same as outbound)
+    async def _max_duration_watchdog():
+        await asyncio.sleep(settings.max_call_duration_sec)
+        logger.warning(
+            "Inbound: max call duration reached (%ds) — forcing shutdown",
+            settings.max_call_duration_sec,
+        )
+        ctx.shutdown(reason="max_duration_exceeded")
+
+    asyncio.create_task(_max_duration_watchdog())
 
 
 async def unified_session(ctx):

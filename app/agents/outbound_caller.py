@@ -607,11 +607,19 @@ class OutboundCallerAgent(Agent):
         await self._record_tool("end_call")
         self._extracted["call_outcome"] = reason
         self._extracted["call_summary"] = summary
-        await self._finalize_call()
-        # Say goodbye first, then wait for TTS to finish, then hang up.
-        # Schedule the hangup as a background task so this tool returns
-        # immediately and the LLM's goodbye text gets generated and spoken.
-        asyncio.create_task(self._graceful_hangup(ctx))
+        # Schedule finalization + hangup AFTER the goodbye TTS finishes.
+        # If we finalize before TTS plays, slow Supabase writes can delay
+        # or cut off the goodbye audio.
+        async def _finalize_then_hangup():
+            try:
+                current_speech = ctx.session.current_speech
+                if current_speech:
+                    await current_speech.wait_for_playout()
+            except Exception as e:
+                logger.warning("wait_for_playout failed: %s", e)
+            await self._finalize_call()
+            await self._hangup()
+        asyncio.create_task(_finalize_then_hangup())
         return "Merci beaucoup pour votre aide. Bonne journee !"
 
     @function_tool()
@@ -626,9 +634,10 @@ class OutboundCallerAgent(Agent):
 
     @function_tool()
     async def acknowledge_and_wait(self, ctx: RunContext) -> str:
-        """Acknowledge what the agent said and wait for more information."""
+        """Acknowledge what the agent said and wait for more information.
+        Use when the interlocutor is still looking up information."""
         await self._record_tool("acknowledge_and_wait")
-        return ""
+        return "En attente de la suite."
 
     @function_tool()
     async def memoriser_appel(
@@ -698,8 +707,17 @@ class OutboundCallerAgent(Agent):
         await self._record_tool("escalate_to_human")
         self._extracted["escalation_reason"] = reason
         self._extracted["call_outcome"] = "escalated"
-        await self._finalize_call()
-        asyncio.create_task(self._graceful_hangup(ctx))
+        # Finalize AFTER goodbye TTS plays (same fix as end_call)
+        async def _finalize_then_hangup():
+            try:
+                current_speech = ctx.session.current_speech
+                if current_speech:
+                    await current_speech.wait_for_playout()
+            except Exception as e:
+                logger.warning("wait_for_playout failed: %s", e)
+            await self._finalize_call()
+            await self._hangup()
+        asyncio.create_task(_finalize_then_hangup())
         return "Je vais devoir verifier avec l'opticien. Puis-je vous rappeler ?"
 
     @function_tool()
