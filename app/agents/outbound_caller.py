@@ -236,6 +236,9 @@ class OutboundCallerAgent(Agent):
         self._tools_called: list[str] = []
         self._call_start = time.time()
         self._finalized = False
+        self._keepalive_task: asyncio.Task | None = None
+        self._silence_keepalive_sec = _s.silence_keepalive_sec
+        self._session_ref = None  # set on first on_user_turn_completed
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         """Override LLM node: measure latency only.
@@ -262,6 +265,31 @@ class OutboundCallerAgent(Agent):
                 first_chunk = False
             yield chunk
 
+    def _start_keepalive_timer(self):
+        """Start silence keepalive — fires "Je suis toujours en ligne" after N seconds."""
+        self._cancel_keepalive_timer()
+
+        async def _keepalive_loop():
+            try:
+                await asyncio.sleep(self._silence_keepalive_sec)
+                if self._session_ref and not self._finalized:
+                    logger.info("Silence keepalive triggered after %.0fs", self._silence_keepalive_sec)
+                    await self._session_ref.generate_reply(
+                        instructions="Dis seulement: Je suis toujours en ligne.",
+                    )
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.debug("Keepalive timer error: %s", e)
+
+        self._keepalive_task = asyncio.create_task(_keepalive_loop())
+
+    def _cancel_keepalive_timer(self):
+        """Cancel the silence keepalive timer."""
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            self._keepalive_task = None
+
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         """LiveKit hook: called after each user turn (STT complete).
 
@@ -273,6 +301,10 @@ class OutboundCallerAgent(Agent):
         """
         if not new_message or not new_message.content:
             return
+
+        # Store session ref for keepalive timer
+        if self._session_ref is None:
+            self._session_ref = getattr(turn_ctx, 'session', None)
 
         turn_start = time.monotonic()
 
@@ -326,13 +358,21 @@ class OutboundCallerAgent(Agent):
             )
 
         if hold_result.hold_started:
-            logger.info("Hold detected — suppressing agent response")
+            logger.info("Hold detected — suppressing agent response + starting keepalive timer")
             record_hold_event(
                 self._tenant_id, "started",
                 call_id=self._call_id, mutuelle=self._mutuelle,
                 reason=hold_result.reason,
                 triggering_phrase=hold_result.triggering_phrase,
             )
+            self._start_keepalive_timer()
+            # Cancel any in-flight preemptive generation (Phase 1D fix)
+            try:
+                session = getattr(turn_ctx, 'session', None)
+                if session and hasattr(session, 'current_speech') and session.current_speech:
+                    session.current_speech.interrupt()
+            except Exception:
+                pass
             self._last_user_utterance = corrected
             raise llm.StopResponse()
         elif hold_result.hold_timeout:
@@ -347,9 +387,17 @@ class OutboundCallerAgent(Agent):
             # H5 FIX: timeout returns is_hold=False, so we DON'T raise
             # StopResponse here. Agent should recover and try to re-engage.
         elif hold_result.is_hold:
+            # Cancel preemptive generation during hold
+            try:
+                session = getattr(turn_ctx, 'session', None)
+                if session and hasattr(session, 'current_speech') and session.current_speech:
+                    session.current_speech.interrupt()
+            except Exception:
+                pass
             self._last_user_utterance = corrected
             raise llm.StopResponse()
         elif hold_result.hold_ended:
+            self._cancel_keepalive_timer()
             logger.info(
                 "Hold ended after %.0fs (reason=%s)",
                 hold_result.duration, hold_result.reason,
@@ -580,7 +628,8 @@ class OutboundCallerAgent(Agent):
             self._extracted["reference"] = reference
         if notes:
             self._extracted["notes"] = notes
-        return "Information enregistree."
+        # Return empty — this tool is SILENT (prompt says "silencieux, pas de parole")
+        return ""
 
     # ── Call control ───────────────────────────────────────
 
@@ -630,17 +679,21 @@ class OutboundCallerAgent(Agent):
         await self._record_tool("end_call")
         self._extracted["call_outcome"] = reason
         self._extracted["call_summary"] = summary
-        # Schedule finalization + hangup AFTER the goodbye TTS finishes.
-        # If we finalize before TTS plays, slow Supabase writes can delay
-        # or cut off the goodbye audio.
+        # Finalize FIRST (persistence), then wait for TTS playout, then hangup.
+        # This ensures data reaches Supabase/webhook even if TTS/room dies.
         async def _finalize_then_hangup():
+            # 1. Persist immediately — most critical step
+            await self._finalize_call()
+            # 2. Wait for goodbye TTS to finish (with timeout)
             try:
                 current_speech = ctx.session.current_speech
                 if current_speech:
-                    await current_speech.wait_for_playout()
+                    await asyncio.wait_for(current_speech.wait_for_playout(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("Goodbye TTS playout timed out after 10s")
             except Exception as e:
                 logger.warning("wait_for_playout failed: %s", e)
-            await self._finalize_call()
+            # 3. Hang up
             await self._hangup()
         asyncio.create_task(_finalize_then_hangup())
         return "Merci beaucoup pour votre aide. Bonne journee !"
@@ -660,7 +713,8 @@ class OutboundCallerAgent(Agent):
         """Acknowledge what the agent said and wait for more information.
         Use when the interlocutor is still looking up information."""
         await self._record_tool("acknowledge_and_wait")
-        return "En attente de la suite."
+        # Silent — agent should not speak while waiting
+        return ""
 
     @function_tool()
     async def memoriser_appel(
@@ -730,15 +784,15 @@ class OutboundCallerAgent(Agent):
         await self._record_tool("escalate_to_human")
         self._extracted["escalation_reason"] = reason
         self._extracted["call_outcome"] = "escalated"
-        # Finalize AFTER goodbye TTS plays (same fix as end_call)
+        # Persist first, then wait for TTS, then hangup (same pattern as end_call)
         async def _finalize_then_hangup():
+            await self._finalize_call()
             try:
                 current_speech = ctx.session.current_speech
                 if current_speech:
-                    await current_speech.wait_for_playout()
-            except Exception as e:
-                logger.warning("wait_for_playout failed: %s", e)
-            await self._finalize_call()
+                    await asyncio.wait_for(current_speech.wait_for_playout(), timeout=10.0)
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning("Escalation playout wait failed: %s", e)
             await self._hangup()
         asyncio.create_task(_finalize_then_hangup())
         return "Je vais devoir verifier avec l'opticien. Puis-je vous rappeler ?"
