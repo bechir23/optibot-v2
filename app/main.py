@@ -746,8 +746,14 @@ async def outbound_session(ctx):
     # Use context-aware multilingual turn detector instead of raw STT endpointing.
     # MultilingualModel understands French conversation structure and reduces
     # double-trigger from split STT segments (e.g., greeting split at comma).
-    from livekit.plugins.turn_detector.multilingual import MultilingualModel
-    _turn_detector = MultilingualModel()
+    # MultilingualModel downloads ONNX model at init — may fail in cloud containers.
+    # Fall back to "stt" if import fails (Deepgram handles endpointing natively).
+    try:
+        from livekit.plugins.turn_detector.multilingual import MultilingualModel
+        _turn_detector = MultilingualModel()
+    except Exception as _td_err:
+        logger.warning("MultilingualModel init failed (%s), falling back to STT turn detection", _td_err)
+        _turn_detector = "stt"
 
     session = AgentSession[CallSessionState](
         stt=stt_model,
@@ -1110,8 +1116,14 @@ async def inbound_session(ctx):
             else f"{settings.tts_provider}/{settings.cartesia_model}"
         )
 
-    from livekit.plugins.turn_detector.multilingual import MultilingualModel
-    _turn_detector = MultilingualModel()
+    # MultilingualModel downloads ONNX model at init — may fail in cloud containers.
+    # Fall back to "stt" if import fails (Deepgram handles endpointing natively).
+    try:
+        from livekit.plugins.turn_detector.multilingual import MultilingualModel
+        _turn_detector = MultilingualModel()
+    except Exception as _td_err:
+        logger.warning("MultilingualModel init failed (%s), falling back to STT turn detection", _td_err)
+        _turn_detector = "stt"
 
     session = AgentSession[CallSessionState](
         stt=stt_model,
