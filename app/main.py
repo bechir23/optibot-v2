@@ -743,6 +743,12 @@ async def outbound_session(ctx):
             else f"{settings.tts_provider}/{settings.cartesia_model}"
         )
 
+    # Use context-aware multilingual turn detector instead of raw STT endpointing.
+    # MultilingualModel understands French conversation structure and reduces
+    # double-trigger from split STT segments (e.g., greeting split at comma).
+    from livekit.plugins.turn_detector.multilingual import MultilingualModel
+    _turn_detector = MultilingualModel()
+
     session = AgentSession[CallSessionState](
         stt=stt_model,
         llm=llm_model,
@@ -750,7 +756,7 @@ async def outbound_session(ctx):
         vad=_get_shared_vad_model(),
         userdata=session_data,
         turn_handling={
-            "turn_detection": "stt",
+            "turn_detection": _turn_detector,
             "endpointing": {
                 "mode": "dynamic",
                 "min_delay": settings.endpointing_min_delay_sec,
@@ -1104,6 +1110,9 @@ async def inbound_session(ctx):
             else f"{settings.tts_provider}/{settings.cartesia_model}"
         )
 
+    from livekit.plugins.turn_detector.multilingual import MultilingualModel
+    _turn_detector = MultilingualModel()
+
     session = AgentSession[CallSessionState](
         stt=stt_model,
         llm=llm_model,
@@ -1111,7 +1120,7 @@ async def inbound_session(ctx):
         vad=_get_shared_vad_model(),
         userdata=session_data,
         turn_handling={
-            "turn_detection": "stt",
+            "turn_detection": _turn_detector,
             "endpointing": {
                 "mode": "dynamic",
                 "min_delay": settings.endpointing_min_delay_sec,

@@ -149,6 +149,13 @@ COLD_TRANSFER_PHRASES = (
     "je vous passe",
     "je vais vous passer",
     "je vais vous transferer",
+    "je vous bascule",
+    "je vous oriente vers",
+    "je vous redirige",
+    "mon collegue va prendre",
+    "ma collegue va prendre",
+    "je passe la main",
+    "je vous mets en attente pour le transfert",
 )
 
 # ── Voicemail-dump signals — long wait followed by forced disconnect ──

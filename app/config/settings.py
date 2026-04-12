@@ -96,10 +96,10 @@ class Settings(BaseSettings):
     deepgram_max_keyterm_tokens: int = 500
 
     # ── Turn Handling & Interruption ────────────────────
-    endpointing_min_delay_sec: float = 0.0  # Deepgram handles endpointing
+    endpointing_min_delay_sec: float = 0.5  # Raised from 0.0 — prevents double-trigger on split STT segments
     endpointing_max_delay_sec: float = 3.0
     interruption_false_timeout_sec: float = 1.5
-    interruption_min_words: int = 2
+    interruption_min_words: int = 3  # Raised from 2 — reduces false interrupts for French filler words
     min_consecutive_speech_delay_sec: float = 0.3  # natural pacing
     audio_sample_rate_hz: int = 24000  # higher quality for SIP transcoding
 
