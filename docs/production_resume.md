@@ -249,3 +249,62 @@ All architectural decisions in this document are backed by:
 
 - Personal: https://github.com/bechir23/optibot-v2 (master)
 - Team: https://github.com/OptiBot-Team/optibot (branch: livekit-rewrite)
+
+## Appendix: Research Findings (Session 2)
+
+### Hardcoded Values Audit
+20+ hardcoded values extracted to settings.py (commit 80bc15e).
+Key values now configurable via env vars: hold detection timeouts,
+AMD thresholds, endpointing delays, interruption settings, audio
+sample rate, tool step limits, call duration cap.
+
+Built-in LiveKit replacement analysis:
+- Keep custom: IVR navigator, AMD, EndCallTool (all more domain-specific)
+- Migrate: FallbackAdapter for inference routing (deferred, small risk)
+
+### Vapi Feature Comparison
+Our domain-specific features (hold detection, French AMD, mutuelle memory,
+STT correction) are STRONGER than Vapi's generic equivalents.
+
+Gaps identified (from Vapi comparison):
+1. Call recording + transcript storage (S3/Supabase) — 1-2 days
+2. Cost tracking per call — 1-2 days  
+3. Outbound webhook for call outcomes (CRM integration) — 1 day
+4. Smart retry scheduler (opening hours, voicemail retry) — 3-5 days
+5. Static KB ingestion for tiers payant rules (PDF/DOCX) — 2-3 days
+
+### Latency Optimization Findings
+- 842-token prompt adds ~200ms TTFT. Trim to ~400 or enable prompt caching.
+- Dynamic endpointing (already enabled) eliminates fixed-delay padding.
+- Adaptive interruption (already enabled) saves ~2s per false interrupt.
+- Turn detector v0.4.1-intl: 39% fewer false positives (check our version).
+- eager_eot_threshold on Deepgram STT v2 — not yet configured.
+- FallbackAdapter with attempt_timeout — not yet configured.
+- ChatMessage.metrics for per-turn latency — not yet consumed.
+
+### Supabase MCP Findings
+Current .mcp.json is valid (project ref fkmagqufenuirktvxezr).
+28+ Supabase MCP tools available (execute_sql, apply_migration, etc.).
+Security: PAT is committed in plaintext — should move to env var.
+
+Recommended external MCP servers:
+- Telnyx MCP (call control, SIP trunk management)
+- n8n MCP (workflow automation for post-call actions)
+- Google Calendar MCP (appointment scheduling)
+
+LiveKit has native MCP client support in AgentSession — MCP tools
+can be used during live calls via mcp_servers parameter.
+
+### Team Repo (v1 Pipecat) Feature Analysis
+6 major features missing vs v1:
+1. Complete domain prompt (14 scenarios, strategy by dossier age)
+2. Discrete Action Space (50+ pre-validated templates, anti-hallucination)
+3. Auto-scheduler (follow-up queue, smart slot selection, dossier scan)
+4. Notification system (n8n webhooks, SMS)
+5. Optimum Live ERP connector (Playwright scraper)
+6. STT/TTS/LLM fallback chains (Groq > Gladia > Deepgram, etc.)
+
+### Deepgram Nova-3 French: CONFIRMED WORKING
+Vapi community report about Nova-3 not supporting French was stale.
+Deepgram expanded Nova-3 to French in their language expansion release.
+Verified: smoke tests show confidence=1.00 on French audio.
