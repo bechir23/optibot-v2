@@ -308,3 +308,61 @@ can be used during live calls via mcp_servers parameter.
 Vapi community report about Nova-3 not supporting French was stale.
 Deepgram expanded Nova-3 to French in their language expansion release.
 Verified: smoke tests show confidence=1.00 on French audio.
+
+## Session 3 Findings (Latest)
+
+### Bugs Fixed This Session
+
+1. **No auto-finalize on dead sessions** (CRITICAL)
+   - Added max_duration_watchdog to both outbound + inbound sessions
+   - Uses settings.max_call_duration_sec (default 600s = 10 min)
+   - Verified: LiveKit has NO built-in max session duration (#3148, #353)
+
+2. **_finalize_call runs before goodbye TTS** (HIGH)
+   - end_call and escalate_to_human now wait for playout before finalizing
+   - Prevents Supabase writes from racing with goodbye audio
+
+3. **acknowledge_and_wait returns empty string** (MEDIUM)
+   - Now returns "En attente de la suite."
+
+4. **15 settings.py values wired into runtime code** (MEDIUM)
+   - Hold detector: timeout, window, threshold, min_return_words
+   - AMD: all 5 thresholds
+   - Keyterm builder: max_keyterms, max_tokens
+   - Call control: cartesia_ws_timeout_warning_sec
+
+5. **Webhook dispatcher added** (NEW FEATURE)
+   - _finalize_call POSTs JSON to webhook_url when configured
+   - Enables CRM/n8n/analytics integration
+
+6. **Settings wired into AgentSession configs** (CLEANUP)
+   - Both outbound + inbound sessions read endpointing/interruption
+     from settings instead of hardcoded values
+
+### Key Research Findings Applied
+
+- OpenAI auto-caches prompts >= 1024 tokens (ours at 842 is below threshold)
+- LiveKit on Telnyx launched April 6, 2026: sub-200ms RTT, 50% cheaper
+- telnyx-livekit-plugin available for co-located STT/TTS/LLM
+- SIP audio fix PRs merged in livekit/sip (mixer buffer, resampler, clock drift)
+- FallbackAdapter released for multi-provider STT/TTS fallback
+- Vapi lacks: backchanneling model, smart endpointing fusion, KB upload, analytics
+
+### All Finalization Paths Now Protected
+
+```
+end_call tool       -> wait playout -> finalize -> hangup
+escalate_to_human   -> wait playout -> finalize -> hangup
+detected_answering_machine -> finalize -> hangup (no TTS)
+User disconnects    -> shutdown callback -> finalize
+SIP drops no BYE    -> RTP timeout -> shutdown callback -> finalize
+Max duration (10min) -> watchdog -> shutdown -> finalize
+Session crash       -> shutdown callback (60s) -> finalize
+```
+
+### Settings.py Coverage
+
+Defined and wired: 15 values (hold, AMD, keyterm, endpointing, interruption, etc.)
+Defined but API-key-only: 8 (used by LiveKit inference routing, not our code)
+Defined but feature not built: 5 (recording, soft/hard timeout, max_llm_tokens)
+Remaining unused in code: 2 (silence_keepalive_sec, max_question_retries — in prompt text only)
