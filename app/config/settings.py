@@ -78,6 +78,38 @@ class Settings(BaseSettings):
     max_llm_tokens: int = 160
     context_budget_tokens: int = 6000
 
+    # ── Hold Detection ──────────────────────────────────
+    hold_timeout_sec: float = 1200.0  # 20 min — MGEN holds avg 15 min
+    hold_ambiguous_window_sec: float = 8.0
+    hold_ambiguous_threshold: int = 2
+    hold_min_return_words: int = 4  # weak hints (voila/alors) need >= N words
+
+    # ── AMD (Answering Machine Detection) ───────────────
+    amd_detection_timeout_sec: float = 30.0
+    amd_speech_threshold_ms: float = 2400.0
+    amd_speech_end_threshold_ms: float = 1200.0
+    amd_silence_timeout_ms: float = 5000.0
+    amd_human_speech_max_ms: float = 2000.0  # French greetings up to 2s
+
+    # ── Keyterm Builder ─────────────────────────────────
+    max_keyterms: int = 100
+    deepgram_max_keyterm_tokens: int = 500
+
+    # ── Turn Handling & Interruption ────────────────────
+    endpointing_min_delay_sec: float = 0.0  # Deepgram handles endpointing
+    endpointing_max_delay_sec: float = 3.0
+    interruption_false_timeout_sec: float = 1.5
+    interruption_min_words: int = 2
+    min_consecutive_speech_delay_sec: float = 0.3  # natural pacing
+    audio_sample_rate_hz: int = 24000  # higher quality for SIP transcoding
+
+    # ── Call Control ────────────────────────────────────
+    max_call_duration_sec: int = 600  # 10 min hard cap
+    max_question_retries: int = 2
+    silence_keepalive_sec: float = 30.0  # "je suis toujours en ligne" after Ns
+    max_tool_steps: int = 8  # default 3 too low for 15+ tools
+    cartesia_ws_timeout_warning_sec: float = 60.0  # Cartesia WS dies at ~60s
+
     # ── Hosting ──────────────────────────────────────
     host: str = "0.0.0.0"
     port: int = 8080
