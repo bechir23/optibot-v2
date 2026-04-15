@@ -17,16 +17,23 @@ Two agent types:
 
 ## What Works
 
-- 134 unit tests passing
+- **157 unit tests passing** (134 pipeline + 9 agent + 14 loop detector)
+- **14 dual-agent personas** with 6 PASSing scenarios (2 perfect 10/10s)
 - French TTS/STT with domain keyterm prompting (100 terms)
-- Hold detection v2 (two-tier, cold transfer, voicemail-dump detection)
+- Hold detection v2 (cold transfer triggers silence, 24+ hold phrases, voicemail-dump)
 - AMD tuned for French (human_speech_max_ms=2000)
 - Per-turn Redis checkpoint for crash recovery
 - Max call duration watchdog (default 10 min)
-- All finalization paths protected (7 exit paths covered)
+- Silence keepalive timer (says "Je suis toujours en ligne" after 30s)
+- Tool call loop detector (sliding-window fingerprint, abort at 3 repeats)
+- All finalization paths protected with 10s timeouts
 - Webhook dispatcher for CRM/n8n integration
+- Direct provider mode (USE_DIRECT_PROVIDERS=true) bypasses LiveKit inference proxy
+- MultilingualModel turn detector with STT fallback
+- preemptive_generation=False (prevents duplicate questions)
+- 12-point rule-based precheck (banned phrases, repetition, vouvoiement, hallucinations)
 - 32 call scenario test library with French phrases
-- 4 mutuelle personas for dual-agent testing
+- Browser-mic live test scripts (live_mic_test.py, live_session.py)
 
 ## Quick Start
 
@@ -49,11 +56,34 @@ lk agent deploy --silent --secrets-file .env --ignore-empty-secrets .
 python scripts/telnyx_setup.py
 ```
 
+## Talk to the deployed agent (browser microphone)
+
+```bash
+# Generates a meet.livekit.io URL — open in browser, click Connect, allow mic
+python scripts/live_mic_test.py                    # default Harmonie scenario
+python scripts/live_mic_test.py --scenario mgen    # MGEN strict NIR
+python scripts/live_mic_test.py --scenario rejection
+python scripts/live_mic_test.py --scenario partial
+
+# Alternative: localhost HTML page with embedded LiveKit client
+python scripts/live_session.py --scenario outbound
+# Open http://localhost:8089 → Connect & Talk
+```
+
+You play the role of the mutuelle operator. The agent (deployed on LiveKit Cloud)
+joins the room automatically and starts the conversation in French.
+
 ## Testing
 
 ```bash
-# Unit tests (134 passing)
+# Unit tests (157 passing — pipeline + agent + loop detector)
 python -m pytest -q
+
+# Dual-agent scenarios (deployed agent vs LLM-driven simulator with real audio)
+python tests/e2e_dual_real_room.py --batch 1   # 4 core (harmonie, mgen, almerys, viamedis)
+python tests/e2e_dual_real_room.py --batch 2   # 4 edge (axa, maaf, voicemail, security)
+python tests/e2e_dual_real_room.py --batch 3   # 4 production (rejection, partial, etc.)
+python tests/e2e_dual_real_room.py --batch 4   # 2 advanced (supervisor, repeat loop)
 
 # LiveKit room probe (agent presence check)
 python tests/e2e_livekit_room_probe.py --wait-seconds 20
@@ -95,25 +125,41 @@ Critical Telnyx settings:
 - `X-Telnyx-Username` in `headers` field (NOT `headers_to_attributes`)
 - `destination_country="FR"` for LiveKit region pinning
 
-## Remaining Work (Prioritized)
+## Remaining Work — Production Readiness Gap Analysis
 
-### Must Do
-1. Complete dual-room test audio glue (~300 lines: Deepgram streaming + OpenAI persona + Cartesia TTS)
-2. Run telnyx_setup.py on real credentials
-3. Port v1 domain prompt (14 scenarios, escalation strategy, tiers payant knowledge)
-4. Add call recording (LiveKit Egress + S3)
+### Top-5 ship blockers (none of these are done)
 
-### Should Do
-5. Add cost tracking per call
-6. Port auto-scheduler from v1 (follow-up queue, smart slot selection)
-7. Add FallbackAdapter for multi-provider STT/TTS
-8. Evaluate telnyx-livekit-plugin for co-located inference (sub-200ms)
+| # | Item | Effort | Why it blocks |
+|---|------|--------|---------------|
+| 1 | Run telnyx_setup.py with real creds + place 1 real PSTN call | Medium (1-2d) | SIP trunk untested end-to-end |
+| 2 | Call recording + transcript persistence (LiveKit Egress → S3 → Supabase) | Medium (2-3d) | RGPD/audit blocker for French health data |
+| 3 | Ops UI (call list, transcript viewer, audio playback, cancel button) + alerting | Large (1-2w) | No opticien will accept a black box |
+| 4 | Multi-tenant onboarding (tenants table, per-tenant API keys, mutuelle profile CRUD) | Large (~1w) | Single global api_key blocks >1 customer |
+| 5 | Consent disclosure ("cet appel est enregistré") + real-PSTN canary in CI | Small (1d) | Article L.34-5 CPCE + RGPD Art. 13 |
 
-### Nice to Have
-9. Port discrete action space from v1 (anti-hallucination architecture)
-10. Static KB ingestion for tiers payant rules (PDF/DOCX)
-11. Notification system (n8n webhooks, SMS)
-12. Optimum Live ERP connector
+### Done in recent commits (Phases 1-4, post-Apr 13)
+
+- Phase 1: 4 critical bugs (silent tools, finalization timeout, keepalive timer, hold cancel)
+- Phase 2: 6 new production personas + batch runner + dependency pinning
+- Phase 3B: Tool call loop detector with sliding-window fingerprint
+- Phase 3 fix: Direct provider mode (USE_DIRECT_PROVIDERS) bypasses LiveKit inference
+- Phase 4: preemptive_generation=False, cold transfer→silence, +6 hold phrases, status-repeat refinement
+
+### Skipped per research recommendations
+
+- Context rot summarization: premature at 6K tokens on gpt-4.1-mini
+- Echo detection: zero evidence in 51-transcript scan, false-positive risk on number/name readbacks
+
+### Other production gaps
+
+- v1 discrete action space architecture (anti-hallucination) not ported
+- No FallbackAdapter for multi-provider STT/TTS resilience
+- No auto-scheduler (every call must be POSTed by external system)
+- Optimum Live ERP connector not ported
+- Static KB ingestion for tiers payant rules
+- No CI pipeline (.github/workflows/ doesn't exist)
+- Sentry/error aggregation not configured
+- Stale docs in production_resume.md and ultraplan_resume.md (predate Phase 1-4)
 
 ## Open LiveKit Issues
 
