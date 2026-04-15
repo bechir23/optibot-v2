@@ -26,6 +26,7 @@ from app.observability.metrics import (
     record_tool_called,
 )
 from app.pipeline.hold_detector import HoldDetector
+from app.pipeline.loop_detector import LoopDetectedError, LoopDetector
 from app.pipeline.stt_correction import correct_transcription
 
 logger = logging.getLogger(__name__)
@@ -239,6 +240,8 @@ class OutboundCallerAgent(Agent):
         self._keepalive_task: asyncio.Task | None = None
         self._silence_keepalive_sec = _s.silence_keepalive_sec
         self._session_ref = None  # set on first on_user_turn_completed
+        # Tool call loop detector — prevents pathological retry spirals
+        self._loop_detector = LoopDetector(window_seconds=60.0, threshold_warn=2, threshold_abort=3)
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         """Override LLM node: measure latency only.
@@ -439,8 +442,17 @@ class OutboundCallerAgent(Agent):
         # Measures transcript post-processing latency (correction + hold decision).
         observe_stt_latency_ms((time.monotonic() - turn_start) * 1000.0)
 
-    async def _record_tool(self, name: str) -> None:
+    async def _record_tool(self, name: str, args: dict | None = None) -> None:
         started = time.monotonic()
+        # Check for tool call loops before processing
+        count, fp = self._loop_detector.record(name, args)
+        if count >= self._loop_detector.threshold_abort:
+            logger.error("Tool loop detected — aborting: tool=%s fp=%s count=%d", name, fp, count)
+            self._extracted["call_outcome"] = "tool_loop_aborted"
+            self._extracted["call_summary"] = f"Boucle d'outil {name} detectee, appel interrompu."
+            raise LoopDetectedError(name, fp, count)
+        if count == self._loop_detector.threshold_warn:
+            logger.warning("Tool repeated — soft warn: tool=%s fp=%s count=%d", name, fp, count)
         self._tools_called.append(name)
         record_tool_called(self._tenant_id, name)
         if self._call_state_store and self._call_id:
