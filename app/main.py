@@ -799,7 +799,10 @@ async def outbound_session(ctx):
         user_away_timeout=None,
         max_tool_steps=settings.max_tool_steps,
         min_consecutive_speech_delay=settings.min_consecutive_speech_delay_sec,
-        preemptive_generation=True,
+        # Disabled: preemptive_generation causes agent to ask the same question
+        # twice when the LLM generates speculatively before user turn is complete.
+        # Tested in dual-agent scenarios — repeated_status_question hard fails.
+        preemptive_generation=False,
     )
 
     dial_task: asyncio.Task | None = None
@@ -1184,7 +1187,10 @@ async def inbound_session(ctx):
         user_away_timeout=None,
         max_tool_steps=settings.max_tool_steps,
         min_consecutive_speech_delay=settings.min_consecutive_speech_delay_sec,
-        preemptive_generation=True,
+        # Disabled: preemptive_generation causes agent to ask the same question
+        # twice when the LLM generates speculatively before user turn is complete.
+        # Tested in dual-agent scenarios — repeated_status_question hard fails.
+        preemptive_generation=False,
     )
 
     await session.start(

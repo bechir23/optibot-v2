@@ -337,9 +337,9 @@ class OutboundCallerAgent(Agent):
         hold_result = self._hold_detector.detect(corrected)
 
         # NEW: cold transfer — different interlocuteur incoming.
-        # Don't suppress; just log and clear stale interlocuteur context.
+        # Suppress agent response and start keepalive — wait for new interlocutor to greet.
         if hold_result.cold_transfer_detected:
-            logger.info("Cold transfer detected — clearing interlocuteur context")
+            logger.info("Cold transfer detected — clearing interlocuteur, suppressing response")
             self._extracted.pop("interlocuteur", None)
             record_hold_event(
                 self._tenant_id, "cold_transfer",
@@ -347,6 +347,16 @@ class OutboundCallerAgent(Agent):
                 reason=hold_result.reason,
                 triggering_phrase=hold_result.triggering_phrase,
             )
+            # Cancel any in-flight speech and stay silent until new person speaks
+            try:
+                session = getattr(turn_ctx, 'session', None)
+                if session and hasattr(session, 'current_speech') and session.current_speech:
+                    session.current_speech.interrupt()
+            except Exception:
+                pass
+            self._start_keepalive_timer()
+            self._last_user_utterance = corrected
+            raise llm.StopResponse()
 
         # NEW: voicemail-dump pattern — Harmonie disconnects after long wait.
         # Mark for graceful end_call instead of waiting for the disconnect.
