@@ -890,14 +890,39 @@ def _rule_based_precheck(result: ScenarioResult) -> dict[str, Any] | None:
         r"remboursement.*statut", r"pouvez[- ]vous\s+me\s+dire\s+o[uù]",
         r"renseigner\s+sur\s+le\s+statut", r"avancement\s+du\s+remboursement",
     ]
+    # Detect ONLY near-verbatim consecutive status repeats (>70% similarity).
+    # Different rephrasings of the same question (e.g., when sim blocks on NIR)
+    # are legitimate persistence, not loops.
     status_count = 0
-    for turn in agent_turns:
+    last_status_text = ""
+    sim_spoke_since_last_status = True
+    for turn in result.turns:
+        if turn.speaker == "system":
+            continue
+        if turn.speaker == "simulator":
+            sim_spoke_since_last_status = True
+            continue
+        # Agent turn
         lower = turn.text.lower()
-        if any(re.search(p, lower) for p in STATUS_PATTERNS):
+        is_status = any(re.search(p, lower) for p in STATUS_PATTERNS)
+        if is_status:
             status_count += 1
-    if status_count > 2:
-        return {"hard_fail": "repeated_status_question",
-                "detail": f"Asked status {status_count} times", "total": 0, "verdict": "FAIL"}
+            if last_status_text and not sim_spoke_since_last_status:
+                sim = SequenceMatcher(None, last_status_text, lower).ratio()
+                if sim > 0.70:
+                    return {"hard_fail": "repeated_status_question",
+                            "detail": f"Status repeated verbatim (sim={sim:.2f})",
+                            "first": last_status_text[:60],
+                            "second": lower[:60],
+                            "total": 0, "verdict": "FAIL"}
+            last_status_text = lower
+            sim_spoke_since_last_status = False
+    # Cap on total (prevent absurd loops). Stubborn mutuelles like MGEN may
+    # legitimately require 5-6 status asks across NIR back-and-forth.
+    if status_count > 7:
+        return {"hard_fail": "excessive_status_questions",
+                "detail": f"Asked status {status_count} times total",
+                "total": 0, "verdict": "FAIL"}
 
     # 6. Agent spoke during hold (within 20s of hold phrase)
     HOLD_PHRASES = ["ne quittez pas", "un instant", "patientez", "je verifie",
