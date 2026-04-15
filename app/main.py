@@ -715,33 +715,53 @@ async def outbound_session(ctx):
     if settings.cartesia_voice_id:
         tts_kwargs["voice"] = settings.cartesia_voice_id
 
-    try:
-        stt_model: Any = inference.STT(
-            model=f"deepgram/{settings.deepgram_model}",
-            language=settings.deepgram_language,
-            extra_kwargs={"keyterm": keyterms},
-        )
-        llm_model: Any = inference.LLM(model=settings.llm_model)
-        tts_model: Any = inference.TTS(
-            model=f"{settings.tts_provider}/{settings.cartesia_model}",
-            **tts_kwargs,
-        )
-    except Exception as e:
-        # Compatibility fallback for self-host/local environments without inference routing.
-        from livekit.plugins import deepgram as deepgram_stt
+    if settings.use_direct_providers:
+        # Direct provider mode — bypass LiveKit Cloud inference proxy.
+        # Required when project credits are exhausted (MaxGatewayCredits 429).
+        from livekit.plugins import cartesia as _cartesia, deepgram as _deepgram, openai as _openai
 
-        logger.warning("Inference init failed; using direct providers: %s", e)
-        stt_model = deepgram_stt.STT(
+        logger.info("Using direct provider connections (bypassing LiveKit inference proxy)")
+        stt_model = _deepgram.STT(
             model=settings.deepgram_model,
             language=settings.deepgram_language,
-            keyterm=keyterms,
+            keyterms=keyterms,
         )
-        llm_model = settings.llm_model
-        tts_model = (
-            f"{settings.tts_provider}/{settings.cartesia_model}:{settings.cartesia_voice_id}"
-            if settings.cartesia_voice_id
-            else f"{settings.tts_provider}/{settings.cartesia_model}"
-        )
+        llm_model = _openai.LLM(model=settings.llm_model.replace("openai/", ""))
+        cartesia_kwargs: dict[str, Any] = {
+            "model": settings.cartesia_model,
+            "language": "fr",
+        }
+        if settings.cartesia_voice_id:
+            cartesia_kwargs["voice"] = settings.cartesia_voice_id
+        tts_model = _cartesia.TTS(**cartesia_kwargs)
+    else:
+        try:
+            stt_model: Any = inference.STT(
+                model=f"deepgram/{settings.deepgram_model}",
+                language=settings.deepgram_language,
+                extra_kwargs={"keyterm": keyterms},
+            )
+            llm_model: Any = inference.LLM(model=settings.llm_model)
+            tts_model: Any = inference.TTS(
+                model=f"{settings.tts_provider}/{settings.cartesia_model}",
+                **tts_kwargs,
+            )
+        except Exception as e:
+            # Compatibility fallback for self-host/local environments without inference routing.
+            from livekit.plugins import deepgram as deepgram_stt
+
+            logger.warning("Inference init failed; using direct providers: %s", e)
+            stt_model = deepgram_stt.STT(
+                model=settings.deepgram_model,
+                language=settings.deepgram_language,
+                keyterm=keyterms,
+            )
+            llm_model = settings.llm_model
+            tts_model = (
+                f"{settings.tts_provider}/{settings.cartesia_model}:{settings.cartesia_voice_id}"
+                if settings.cartesia_voice_id
+                else f"{settings.tts_provider}/{settings.cartesia_model}"
+            )
 
     # Use context-aware multilingual turn detector instead of raw STT endpointing.
     # MultilingualModel understands French conversation structure and reduces
@@ -1089,32 +1109,47 @@ async def inbound_session(ctx):
     if settings.cartesia_voice_id:
         tts_kwargs["voice"] = settings.cartesia_voice_id
 
-    try:
-        stt_model: Any = inference.STT(
-            model=f"deepgram/{settings.deepgram_model}",
-            language=settings.deepgram_language,
-            extra_kwargs={"keyterm": keyterms},
-        )
-        llm_model: Any = inference.LLM(model=settings.llm_model)
-        tts_model: Any = inference.TTS(
-            model=f"{settings.tts_provider}/{settings.cartesia_model}",
-            **tts_kwargs,
-        )
-    except Exception as e:
-        from livekit.plugins import deepgram as deepgram_stt
+    if settings.use_direct_providers:
+        from livekit.plugins import cartesia as _cartesia, deepgram as _deepgram, openai as _openai
 
-        logger.warning("Inference init failed; using direct providers: %s", e)
-        stt_model = deepgram_stt.STT(
+        logger.info("Inbound: using direct provider connections")
+        stt_model = _deepgram.STT(
             model=settings.deepgram_model,
             language=settings.deepgram_language,
-            keyterm=keyterms,
+            keyterms=keyterms,
         )
-        llm_model = settings.llm_model
-        tts_model = (
-            f"{settings.tts_provider}/{settings.cartesia_model}:{settings.cartesia_voice_id}"
-            if settings.cartesia_voice_id
-            else f"{settings.tts_provider}/{settings.cartesia_model}"
-        )
+        llm_model = _openai.LLM(model=settings.llm_model.replace("openai/", ""))
+        cartesia_kwargs: dict[str, Any] = {"model": settings.cartesia_model, "language": "fr"}
+        if settings.cartesia_voice_id:
+            cartesia_kwargs["voice"] = settings.cartesia_voice_id
+        tts_model = _cartesia.TTS(**cartesia_kwargs)
+    else:
+        try:
+            stt_model: Any = inference.STT(
+                model=f"deepgram/{settings.deepgram_model}",
+                language=settings.deepgram_language,
+                extra_kwargs={"keyterm": keyterms},
+            )
+            llm_model: Any = inference.LLM(model=settings.llm_model)
+            tts_model: Any = inference.TTS(
+                model=f"{settings.tts_provider}/{settings.cartesia_model}",
+                **tts_kwargs,
+            )
+        except Exception as e:
+            from livekit.plugins import deepgram as deepgram_stt
+
+            logger.warning("Inference init failed; using direct providers: %s", e)
+            stt_model = deepgram_stt.STT(
+                model=settings.deepgram_model,
+                language=settings.deepgram_language,
+                keyterm=keyterms,
+            )
+            llm_model = settings.llm_model
+            tts_model = (
+                f"{settings.tts_provider}/{settings.cartesia_model}:{settings.cartesia_voice_id}"
+                if settings.cartesia_voice_id
+                else f"{settings.tts_provider}/{settings.cartesia_model}"
+            )
 
     # MultilingualModel downloads ONNX model at init — may fail in cloud containers.
     # Fall back to "stt" if import fails (Deepgram handles endpointing natively).

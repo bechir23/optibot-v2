@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     llm_model: str = "openai/gpt-4.1-mini"
     llm_fallback_model: str = "mistral-small-latest"
 
+    # When True, bypass LiveKit's inference proxy and use direct provider
+    # connections (Deepgram/Cartesia/OpenAI). Required when LiveKit Cloud
+    # gateway credits are exhausted (MaxGatewayCredits quota error).
+    use_direct_providers: bool = False
+
     # ── STT / TTS ────────────────────────────────────
     deepgram_api_key: str = ""
     deepgram_model: str = "nova-3"
