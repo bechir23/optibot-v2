@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     # Agent name for LiveKit registration (must match dispatch rules)
     agent_name: str = "optibot"
 
+    # ── Tenant defaults (used when no per-tenant override) ──
+    # Compliance: EU AI Act Art. 50 + RGPD Art. 13 + CNIL délibération 2023-094.
+    # Tenant name appears in the consent disclosure: "Bonjour, je suis un
+    # assistant vocal automatise du cabinet d'optique {tenant_name}."
+    default_tenant_name: str = ""
+    # Optional override template — use {tenant_name} placeholder. Leave empty to
+    # use the default ("Bonjour, je suis un assistant vocal automatise...").
+    default_consent_template: str = ""
+
     # ── Security ─────────────────────────────────────
     api_key: str = ""
     api_auth_required: bool = True

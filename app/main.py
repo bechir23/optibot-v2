@@ -60,18 +60,62 @@ def _get_shared_vad_model() -> Any:
     return _SHARED_VAD_MODEL
 
 
-def _local_loopback_greeting(dossier_type: str) -> str:
+def _build_consent_disclosure(
+    *,
+    tenant_name: str = "",
+    recording_enabled: bool = False,
+    consent_template: str | None = None,
+) -> str:
+    """Build legally compliant French disclosure for the agent's first words.
+
+    Compliance:
+    - EU AI Act Art. 50 (transposed 2026-08-02): synthetic-voice disclosure required.
+    - RGPD Art. 13: if recording, must inform purpose at call start.
+    - CNIL délibération 2023-094: recording disclosure mandatory.
+
+    Tenant can override via consent_template (with {tenant_name} placeholder).
+    """
+    if consent_template:
+        return consent_template.format(tenant_name=tenant_name or "l'opticien")
+    base = f"Bonjour, je suis un assistant vocal automatise du cabinet d'optique {tenant_name or 'l opticien'}."
+    recording = " Cet appel peut etre enregistre pour la qualite du suivi." if recording_enabled else ""
+    return base + recording
+
+
+def _local_loopback_greeting(
+    dossier_type: str,
+    *,
+    tenant_name: str = "",
+    recording_enabled: bool = False,
+    consent_template: str | None = None,
+) -> str:
+    disclosure = _build_consent_disclosure(
+        tenant_name=tenant_name,
+        recording_enabled=recording_enabled,
+        consent_template=consent_template,
+    )
     return (
-        "Commence par une salutation breve et naturelle, sans outil et sans formule d'attente. "
-        f"Presente-toi comme l'assistant automatique de suivi tiers payant de l'opticien au sujet d'un dossier {dossier_type}. "
-        "Demande ensuite si vous etes bien au bon service."
+        f"Commence IMPERATIVEMENT par cette phrase exacte, sans la modifier: \"{disclosure}\". "
+        f"Puis enchaine naturellement: explique brievement que tu appelles au sujet d'un dossier {dossier_type} en attente de remboursement, "
+        "et demande si tu es bien au bon service. Pas de formule d'attente, pas d'outil au premier tour."
     )
 
 
-def _inbound_greeting() -> str:
+def _inbound_greeting(
+    *,
+    tenant_name: str = "",
+    recording_enabled: bool = False,
+    consent_template: str | None = None,
+) -> str:
+    disclosure = _build_consent_disclosure(
+        tenant_name=tenant_name,
+        recording_enabled=recording_enabled,
+        consent_template=consent_template,
+    )
     return (
-        "Commence par une vraie salutation d'accueil, sans formule d'attente ni verification. "
-        "Dis simplement que l'appelant est bien chez l'opticien puis demande comment tu peux aider."
+        f"Commence IMPERATIVEMENT par cette phrase exacte, sans la modifier: \"{disclosure}\". "
+        "Puis demande naturellement comment tu peux aider l'appelant. "
+        "Pas de formule d'attente, pas de verification au premier tour."
     )
 
 
@@ -958,7 +1002,12 @@ async def outbound_session(ctx):
             ctx,
             session,
             label="outbound-local-loopback",
-            instructions=_local_loopback_greeting(dossier.get("dossier_type", "optique")),
+            instructions=_local_loopback_greeting(
+                dossier.get("dossier_type", "optique"),
+                tenant_name=settings.default_tenant_name,
+                recording_enabled=settings.recording_enabled,
+                consent_template=settings.default_consent_template or None,
+            ),
         )
         if not greeted:
             logger.warning("Local loopback: no participant joined within 60s; shutting down")
@@ -1215,7 +1264,11 @@ async def inbound_session(ctx):
         ctx,
         session,
         label="inbound",
-        instructions=_inbound_greeting(),
+        instructions=_inbound_greeting(
+            tenant_name=settings.default_tenant_name,
+            recording_enabled=settings.recording_enabled,
+            consent_template=settings.default_consent_template or None,
+        ),
     )
     if not greeted:
         logger.warning("Inbound: no caller joined within 60s; shutting down")
