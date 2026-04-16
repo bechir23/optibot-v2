@@ -1,8 +1,9 @@
-"""API routes — /health, /api/call, /api/schedule, /metrics."""
+"""API routes — /health, /api/call, /api/schedule, /metrics, /api/calls (ops)."""
 from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Header
 
@@ -195,3 +196,74 @@ async def prometheus_metrics():
     from fastapi.responses import PlainTextResponse
     from prometheus_client import generate_latest
     return PlainTextResponse(content=generate_latest(), media_type="text/plain")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Phase 5 Blocker 3: Ops UI endpoints (read-only, per-tenant)
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/api/calls")
+async def list_calls(
+    tenant: TenantContext = Depends(require_tenant),
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    mutuelle: str | None = None,
+):
+    """List recent calls for the authenticated tenant."""
+    from app.main import app_state
+
+    if not app_state.supabase:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    filters: dict[str, Any] = {"tenant_id": tenant.tenant_id}
+    if status:
+        filters["outcome"] = status
+    if mutuelle:
+        filters["mutuelle"] = mutuelle
+
+    try:
+        rows = await app_state.supabase.select(
+            "call_log", filters, limit=min(limit, 200),
+        )
+        return {"total": len(rows), "calls": rows}
+    except Exception as e:
+        logger.error("list_calls failed: %s", e)
+        raise HTTPException(status_code=500, detail="Query failed")
+
+
+@router.get("/api/calls/{call_id}")
+async def get_call(
+    call_id: str,
+    tenant: TenantContext = Depends(require_tenant),
+):
+    """Get call details + transcript for the authenticated tenant."""
+    from app.main import app_state
+
+    if not app_state.supabase:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    try:
+        call_rows = await app_state.supabase.select(
+            "call_log", {"id": call_id, "tenant_id": tenant.tenant_id}, limit=1,
+        )
+        if not call_rows:
+            raise HTTPException(status_code=404, detail="Call not found")
+
+        transcript_rows = await app_state.supabase.select(
+            "call_transcript", {"call_id": call_id, "tenant_id": tenant.tenant_id}, limit=500,
+        )
+        recording_rows = await app_state.supabase.select(
+            "call_recordings", {"call_id": call_id, "tenant_id": tenant.tenant_id}, limit=1,
+        )
+
+        return {
+            "call": call_rows[0],
+            "transcript": sorted(transcript_rows, key=lambda r: r.get("ts_ms", 0)),
+            "recording": recording_rows[0] if recording_rows else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("get_call failed: %s", e)
+        raise HTTPException(status_code=500, detail="Query failed")

@@ -224,7 +224,9 @@ app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(TenantContextMiddleware)
 
 from app.api.routes import router
+from app.api.ops_ui import ops_router
 app.include_router(router)
+app.include_router(ops_router)
 
 
 def _parse_job_metadata(raw_metadata: str | None) -> dict[str, Any]:

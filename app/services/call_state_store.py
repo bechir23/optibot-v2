@@ -163,6 +163,41 @@ class CallStateStore:
         state["tools_called"].append(tool_name)
         await self._redis.setex(self._key(call_id), self._ttl, json.dumps(state))
 
+    async def append_turn(
+        self,
+        call_id: str,
+        tenant_id: str,
+        role: str,
+        text: str,
+        tool_name: str | None = None,
+        tool_args: dict | None = None,
+    ) -> None:
+        """Persist a conversation turn to Supabase call_transcript (ops UI).
+
+        role: 'agent' | 'user' | 'system' | 'tool'
+        Fire-and-forget: failures logged, never raised.
+        """
+        if not self._supabase or not text or not text.strip():
+            return
+        raw = await self._redis.get(self._key(call_id))
+        ts_ms = 0
+        if raw:
+            state = json.loads(raw)
+            started = state.get("started_at") or time.time()
+            ts_ms = int((time.time() - started) * 1000)
+        try:
+            await self._supabase.insert("call_transcript", {
+                "call_id": call_id,
+                "tenant_id": tenant_id,
+                "ts_ms": ts_ms,
+                "role": role,
+                "text": text[:2000],  # truncate pathological sizes
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+            })
+        except Exception as e:
+            logger.debug("append_turn failed (non-critical): %s", e)
+
     async def mark_error(self, call_id: str, error: str) -> None:
         raw = await self._redis.get(self._key(call_id))
         if not raw:
