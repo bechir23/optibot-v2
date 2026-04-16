@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     max_ivr_attempts: int = 5
     max_concurrent_calls: int = 10
     recording_enabled: bool = False
+    # Phase 5 Blocker 2: S3-compatible storage for call recordings.
+    # Recommended: Scaleway Paris (fr-par) — HDS-certified, RGPD-compliant.
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_region: str = "fr-par"
+    s3_endpoint: str = "https://s3.fr-par.scw.cloud"  # Scaleway Paris default
+    s3_recordings_bucket: str = "optibot-recordings"
+    recording_retention_days: int = 180  # CNIL guidance: 6 months
     max_llm_tokens: int = 160
     context_budget_tokens: int = 6000
 

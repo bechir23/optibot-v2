@@ -1014,6 +1014,19 @@ async def outbound_session(ctx):
             ctx.shutdown()
             return
 
+    # Phase 5 Blocker 2: start RGPD-compliant call recording after participant joins.
+    # Disclosure already announced by greeting (see _local_loopback_greeting).
+    if settings.recording_enabled:
+        from app.services.recording import start_egress
+        await start_egress(
+            lk_api=ctx.api,
+            room_name=ctx.room.name,
+            tenant_id=tenant_id,
+            call_id=ctx.room.name,
+            supabase=app_state.supabase,
+            settings=settings,
+        )
+
     # End-of-session finalization via add_shutdown_callback.
     # More reliable than room.on("disconnected") which has known issues:
     #   #1581: not triggered consistently on unexpected process exit
@@ -1274,6 +1287,18 @@ async def inbound_session(ctx):
         logger.warning("Inbound: no caller joined within 60s; shutting down")
         ctx.shutdown()
         return
+
+    # Phase 5 Blocker 2: RGPD-compliant recording for inbound calls
+    if settings.recording_enabled:
+        from app.services.recording import start_egress
+        await start_egress(
+            lk_api=ctx.api,
+            room_name=ctx.room.name,
+            tenant_id=tenant_id,
+            call_id=ctx.room.name,
+            supabase=app_state.supabase,
+            settings=settings,
+        )
 
     async def _finalize_inbound_on_shutdown(reason: str = "") -> None:
         if not agent.extracted_data.get("call_outcome"):
