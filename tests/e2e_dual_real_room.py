@@ -149,10 +149,10 @@ REGLES:
 - Francais uniquement.
 - Phrases courtes.
 - Premier tour: "Almerys bonjour."
-- Apres que l'opticien explique son motif (suivi de dossier), tu dis "je vous mets en relation avec le service tiers payant, ne quittez pas".
-- Apres ce transfert, tu changes de role: tu deviens Patrick, gestionnaire tiers payant.
-- En tant que Patrick: "Patrick du service tiers payant, j'ecoute."
-- Patrick donne le statut: "le dossier est en attente, il manque la prescription medicale."
+- Tour 1: "Almerys bonjour."
+- Tour 2 (des que l'opticien explique son motif): "je vous mets en relation avec le service tiers payant, ne quittez pas."
+- Tour 3 OBLIGATOIRE: tu changes de role et reponds EN TANT QUE Patrick (pas de pause): "Patrick du service tiers payant, j'ecoute. Le dossier Dupont est en attente, il manque la prescription medicale. Comptez huit jours ouvres apres reception."
+- Tour 4+: tu restes Patrick et reponds aux questions complementaires, puis concluras poliment.
 - Tu testes que l'opticien gere bien le changement d'interlocuteur sans confondre les noms.
 
 GOAL: Tester la detection de cold transfer + le changement d'interlocuteur.""",
@@ -172,9 +172,9 @@ REGLES:
 - Francais uniquement.
 - Premier tour: "Viamedis tiers payant, Jean a votre ecoute."
 - Tu demandes le numero de bordereau.
-- Apres avoir recu le numero, tu dis "merci, un instant je vais aller chercher votre dossier, ne quittez pas".
-- Au tour suivant tu reviens: "merci de votre patience, alors j'ai votre dossier sous les yeux."
-- Tu donnes le statut: "le dossier a ete teletransmis le 15 mars, la mutuelle l'a recu mais le paiement n'a pas encore ete edite."
+- Apres avoir recu le numero, tu dis UNIQUEMENT: "merci, ne quittez pas."
+- Au tour suivant tu reviens directement: "merci de votre patience. Le dossier a ete teletransmis le 15 mars, la mutuelle l'a recu mais le paiement n'a pas encore ete edite. Comptez dix jours ouvres."
+- Ne simule JAMAIS un silence dans ton texte ("(Met en attente)" interdit). Un seul tour = une seule elocution continue.
 - Tu testes que l'opticien gere correctement le hold (silence) puis le retour.
 
 GOAL: Tester la suppression pendant l'attente + reprise apres retour.""",
@@ -418,12 +418,15 @@ sur ces criteres:
 3. french_register (0-1): Francais naturel, sans anglicismes ?
 4. no_banned_phrases (0-1, hard fail): A-t-il EVITE les phrases bannies au premier tour
    ("un instant", "je verifie", "laissez-moi verifier", "je regarde", "je reflechis") ?
-5. no_loop (0-1, hard fail): A-t-il EVITE de repeter la meme phrase deux fois de suite ?
+5. no_loop (0-1, hard fail): A-t-il EVITE de repeter la MEME question SEMANTIQUE apres une reponse du simulateur ? ATTENTION: deux tours consecutifs de l'assistant SANS tour du simulateur entre eux proviennent probablement d'une SEULE reponse fragmentee par la pause de synthese vocale — ce n'est PAS une boucle. Ne considere une boucle QUE si l'assistant repete la meme question APRES que le simulateur a parle.
+   Aussi: un reecho de chiffres (LPP, reference, montant) pour confirmation n'est PAS une boucle.
+6bis. graceful_close: considere qu'un end_call implicite (absence de tour final mais appel de l'outil) est acceptable. Note 1 si l'assistant a dit au revoir OU a clairement conclu.
 6. tool_correctness (0-2): A-t-il appele les outils dans le bon ordre ?
 7. no_hallucination (0-1, hard fail): A-t-il evite d'inventer des donnees ?
 8. graceful_close (0-1): A-t-il conclu poliment ?
 
 Total: 0-10. Hard fails (no_banned_phrases, no_loop, no_hallucination) zero le score.
+IMPORTANT: pour no_banned_phrases, ne considere comme banni que les mots reellement prononces par l'ASSISTANT. Si un mot banni apparait dans un tour du SIMULATEUR, cela ne compte pas. Verifie le champ "speaker".
 
 Reponds UNIQUEMENT en JSON:
 {"info_collected": 0-3, "politeness": 0-1, "french_register": 0-1, "no_banned_phrases": 0-1,
