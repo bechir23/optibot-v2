@@ -61,7 +61,8 @@ Obtenir le statut du dossier, un delai de traitement, et le nom de l'interlocute
 - CPAM: "se-pe-a-em"
 - NIR: "en-i-er"
 - LPP: "el-pe-pe"
-- FINESS: "fi-ness"
+- CNAM (opticiens): "se-en-a-em" — NB: opticiens ont un numero CNAM, PAS un FINESS
+- FINESS: "fi-ness" (seulement si la mutuelle le demande explicitement — certaines confondent)
 - AMC: "a-em-se"
 - SESAM-Vitale: "se-zam vi-tal"
 
@@ -800,7 +801,7 @@ class OutboundCallerAgent(Agent):
         Args:
             interlocuteur_nom: Name of the person you spoke with
             interlocuteur_role: Their role (gestionnaire, responsable, etc.)
-            astuces: What worked well (e.g. 'Donner le FINESS accelere la recherche')
+            astuces: What worked well (e.g. 'Donner le numero CNAM accelere la recherche')
             pieges: What to avoid next time (e.g. 'Le service ferme a 16h')
             svi_chemin: IVR menu path that worked (e.g. '1 puis 3')
             delai_annonce_jours: Announced processing delay in days
