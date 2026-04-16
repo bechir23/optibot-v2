@@ -654,6 +654,18 @@ async def outbound_session(ctx):
     if app_state.mutuelle_memory and mutuelle:
         try:
             mutuelle_memory = await app_state.mutuelle_memory.load(mutuelle, tenant_id)
+            # Phase 6: load open followups for this specific dossier
+            dossier_ref = dossier.get("dossier_ref", "") if isinstance(dossier, dict) else ""
+            if dossier_ref:
+                try:
+                    open_items = await app_state.mutuelle_memory.load_open_items(
+                        tenant_id, mutuelle, dossier_ref,
+                    )
+                    if open_items:
+                        mutuelle_memory["open_items"] = open_items
+                        logger.info("Loaded %d open followups for dossier %s", len(open_items), dossier_ref)
+                except Exception as e:
+                    logger.warning("Open items load failed: %s", e)
             if mutuelle_memory:
                 memory_text = app_state.mutuelle_memory.format_for_prompt(mutuelle_memory)
                 rag_context["mutuelle_memory"] = memory_text

@@ -87,13 +87,13 @@ REGLE TOOLS CRITIQUE:
 # Conversation Flow
 1. Attendre la reponse du correspondant (ne parle pas en premier sauf greeting initial).
 2. Identifier: appeler give_patient_name puis give_dossier_reference (un outil par tour). NE DEMANDE PAS le nom — tu le connais, donne-le.
-3. Si on te demande le NIR: appeler give_nir. Si on te demande la date de naissance: appeler give_date_of_birth. NE DICTE JAMAIS toi-meme.
+3. Si on te demande le NIR: appeler give_nir. Si on te demande la date de naissance OU un critere pour desambiguer (ex. "j'ai deux assures, quelle date?"): appeler IMMEDIATEMENT give_date_of_birth. NE DICTE JAMAIS de chiffres (date, NIR, reference, montant, code LPP) toi-meme — passe TOUJOURS par l'outil. Reecho de code LPP ou montant donne par l'interlocuteur: autorise UNIQUEMENT pour confirmation, en repetant EXACTEMENT les memes chiffres entendus, sans rien inventer.
 4. Exposer: demander le statut du remboursement UNE SEULE FOIS. Si tu l'as deja demande, ne repete pas — attends ou reformule.
 5. Ecouter: laisser chercher, ne pas couper. Si on te dit "patientez" ou "ne quittez pas", reste silencieux.
 6. Extraire: chaque info recue -> appeler extract_information (silencieux, pas de parole). Statut, delai, nom, reference, document manquant.
-7. Ne pose pas deux fois la meme question. Si tu as deja demande le statut, passe a la question suivante (delai, nom interlocuteur, reference).
+7. Ne pose pas deux fois la meme question. Si tu as deja demande le statut, passe a la question suivante (delai, nom interlocuteur, reference). UNE SEULE phrase interrogative par tour. Ne reformule pas immediatement ta question — attends la reponse.
 8. Memoriser: appeler memoriser_appel avant de raccrocher.
-9. Conclure: dire au revoir poliment, puis appeler end_call avec un resume complet.
+9. Conclure: DES QUE tu as obtenu le statut ET un delai (ou un motif de rejet), OU que l'interlocuteur dit "bonne journee", "autre chose?", "a votre disposition", "n'hesitez pas": tu DOIS dire "Je vous remercie pour ces informations, bonne journee." puis appeler end_call avec un resume complet. NE JAMAIS laisser l'appel se terminer par timeout.
 
 # Silence Policy (CRITIQUE — respect strict)
 - DECLENCHEURS DE SILENCE: si tu entends "ne quittez pas", "un instant", "patientez", "veuillez patienter", "je verifie", "je vais chercher", "merci de patienter", "restez en ligne", OU "un moment s'il vous plait", tu DOIS rester COMPLETEMENT silencieux.
@@ -102,17 +102,22 @@ REGLE TOOLS CRITIQUE:
 - DECLENCHEURS DE COLD TRANSFER: "je vous mets en relation", "je vous transfere", "je vous passe", "je vous bascule" → meme regle: SILENCE jusqu'au nouveau correspondant.
 - Si plus de 30 secondes de silence APRES que l'interlocuteur a repris la parole sans donner d'info: "Je suis toujours en ligne."
 - Si tu ne comprends pas: "Pardon, pouvez-vous repeter ?"
+- INTERDIT ABSOLU: repeter ou reformuler un declencheur de silence ("un instant", "patientez", "ne quittez pas", "je verifie", "je vais chercher"). Si tu lis ces mots dans ton contexte, ils viennent de l'INTERLOCUTEUR — tais-toi, ne les prononce JAMAIS.
+- INTERDIT: enchainer plusieurs questions dans le meme tour. UNE question par tour, puis attends la reponse.
 
-# Repondeur (messagerie vocale)
-Appelle detected_answering_machine IMMEDIATEMENT si tu entends une de ces phrases francaises typiques de repondeur:
-- "Bonjour, vous etes bien sur le repondeur de..."
-- "Vous etes sur la messagerie de..." / "messagerie vocale de..."
-- "Votre correspondant n'est pas disponible" / "n'est pas joignable"
-- "Je ne suis pas disponible pour le moment"
-- "Laissez un message apres le bip" / "apres le signal sonore" / "apres la tonalite"
-- "Merci de laisser un message"
-- "Veuillez laisser votre message"
-Ne JAMAIS laisser de message vocal.
+# Repondeur (messagerie vocale) — PRIORITE ABSOLUE
+DES QUE tu entends UN SEUL de ces marqueurs, tu DOIS IMMEDIATEMENT:
+  1. Appeler l'outil detected_answering_machine (SANS rien dire a voix haute).
+  2. Puis appeler end_call avec raison="repondeur".
+Marqueurs (suffit d'un seul, meme partiel):
+- "repondeur", "messagerie", "messagerie vocale"
+- "vous etes bien sur", "vous etes sur"
+- "nos bureaux sont ouverts", "horaires d'ouverture"
+- "n'est pas disponible", "n'est pas joignable"
+- "laissez un message", "apres le bip", "apres le signal", "apres la tonalite"
+- "merci de laisser", "veuillez laisser"
+INTERDIT ABSOLU: laisser un message vocal, dire "bonjour je rappelle", rester silencieux sans raccrocher.
+Des le 2eme tour sans humain, tu DOIS raccrocher via end_call.
 
 # Guardrails
 - Tu es un assistant automatique. Si on te demande: "Je suis l'assistant de suivi automatique de chez l'opticien."
@@ -246,29 +251,64 @@ class OutboundCallerAgent(Agent):
         self._loop_detector = LoopDetector(window_seconds=60.0, threshold_warn=2, threshold_abort=3)
 
     async def llm_node(self, chat_ctx, tools, model_settings):
-        """Override LLM node: measure latency only.
+        """Override LLM node: measure latency + hard timeout + anti-fragmentation.
 
-        IMPORTANT: we do NOT inject filler phrases here. The previous
-        implementation yielded "Un instant..." / "Je réfléchis..." /
-        "Laissez-moi vérifier..." whenever the first LLM chunk took >3s,
-        which compounded into a loop where the agent prefixed every
-        slow response with a wait phrase. Production systems (OpenAI
-        Realtime, Retell, Vapi) do NOT prepend fillers to LLM output —
-        they either rely on preemptive_generation (already enabled on
-        our AgentSession) or use deterministic pre-tool speech tied to
-        specific tool calls.
-
-        If we want to prevent dead air during slow LLM inference, the
-        correct fix is at the infrastructure level (faster LLM, EU POP,
-        prompt caching) not at the speech level.
+        MS call-center-ai pattern (Phase 6):
+        - Hard timeout at answer_hard_timeout_sec (default 15s): abort with error
+        - Anti-fragmentation: if last 2 messages in chat_ctx are both agent (no
+          user turn between), suppress this response to avoid multi-question spray
+          seen in viamedis/multiple_matches scenarios (research agent finding).
         """
+        # Anti-fragmentation check (research agent #2 recommendation)
+        try:
+            items = list(getattr(chat_ctx, 'items', []))
+            # Count trailing consecutive agent messages (excl. system, function_call)
+            trailing_agent = 0
+            for item in reversed(items):
+                role = getattr(item, 'role', None) or getattr(item, 'type', None)
+                if role in ("user",):
+                    break
+                if role in ("assistant", "agent"):
+                    trailing_agent += 1
+                if trailing_agent >= 2:
+                    # Two agent turns in a row with no user turn between — suppress
+                    logger.warning("Suppressing fragmented agent turn (2+ consecutive)")
+                    from livekit.agents import llm as _llm
+                    raise _llm.StopResponse()
+        except Exception as e:
+            # Framework API changed — don't block generation
+            if "StopResponse" not in str(type(e).__name__):
+                logger.debug("Anti-fragmentation check failed: %s", e)
+            else:
+                raise
+
         llm_start = time.monotonic()
         first_chunk = True
-        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
-            if first_chunk:
-                observe_llm_latency_ms((time.monotonic() - llm_start) * 1000.0)
-                first_chunk = False
-            yield chunk
+
+        from app.config.settings import Settings as _S
+        hard_timeout = _S().answer_hard_timeout_sec
+
+        async def _generate():
+            async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+                yield chunk
+
+        try:
+            gen = _generate().__aiter__()
+            while True:
+                try:
+                    # Hard timeout protects against runaway LLM
+                    chunk = await asyncio.wait_for(gen.__anext__(), timeout=hard_timeout)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    logger.error("LLM hard timeout after %.1fs — aborting response", hard_timeout)
+                    break
+                if first_chunk:
+                    observe_llm_latency_ms((time.monotonic() - llm_start) * 1000.0)
+                    first_chunk = False
+                yield chunk
+        finally:
+            pass
 
     def _start_keepalive_timer(self):
         """Start silence keepalive — fires "Je suis toujours en ligne" after N seconds."""
@@ -750,6 +790,9 @@ class OutboundCallerAgent(Agent):
         pieges: str = "",
         svi_chemin: str = "",
         delai_annonce_jours: int = 0,
+        suivi_requis: str = "",
+        statut_dossier: str = "",
+        rappel_apres: str = "",
     ) -> str:
         """Save learnings from this call for future calls to the same mutuelle.
         Call this BEFORE end_call. Record what worked, what to avoid, and who you spoke with.
@@ -761,6 +804,9 @@ class OutboundCallerAgent(Agent):
             pieges: What to avoid next time (e.g. 'Le service ferme a 16h')
             svi_chemin: IVR menu path that worked (e.g. '1 puis 3')
             delai_annonce_jours: Announced processing delay in days
+            suivi_requis: Follow-up action needed (e.g. 'attestation mutuelle a renvoyer')
+            statut_dossier: Dossier status: 'awaiting_doc' | 'callback_scheduled' | 'resolved'
+            rappel_apres: ISO date after which to call back (e.g. '2026-04-22')
         """
         await self._record_tool("memoriser_appel")
         call_data = {}
@@ -792,6 +838,18 @@ class OutboundCallerAgent(Agent):
                     )
                     await memory.save(self._mutuelle, self._tenant_id, call_data)
                     logger.info("Saved mutuelle memory for %s", self._mutuelle)
+
+                    # Phase 6: persist dossier followup for cross-call continuity
+                    if statut_dossier and self._dossier_ref:
+                        await memory.upsert_followup(
+                            tenant_id=self._tenant_id,
+                            mutuelle=self._mutuelle,
+                            dossier_ref=self._dossier_ref,
+                            state=statut_dossier,
+                            note=suivi_requis,
+                            callback_after=rappel_apres or None,
+                        )
+                        logger.info("Saved followup for %s: state=%s", self._dossier_ref, statut_dossier)
                 except Exception as e:
                     logger.warning("Failed to save mutuelle memory: %s", e)
             asyncio.create_task(_save_memory())

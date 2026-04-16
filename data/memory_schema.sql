@@ -127,3 +127,58 @@ BEGIN
         derniere_utilisation = NOW();
 END;
 $$;
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- Phase 6: Dossier-level open items / followups (cross-call continuity)
+-- Research: Microsoft call-center-ai has "reminders" — we need the same
+-- for multi-call dossier workflows (e.g. "document X pending since date Y").
+-- ═══════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS dossier_followups (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    mutuelle_nom TEXT NOT NULL,
+    dossier_ref TEXT NOT NULL,
+    state TEXT NOT NULL, -- 'awaiting_doc' | 'callback_scheduled' | 'resolved'
+    note TEXT,
+    callback_after TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    UNIQUE (tenant_id, dossier_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_followups_mutuelle ON dossier_followups(tenant_id, mutuelle_nom) WHERE state != 'resolved';
+CREATE INDEX IF NOT EXISTS idx_followups_dossier ON dossier_followups(tenant_id, dossier_ref);
+
+ALTER TABLE dossier_followups ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_rw_followups ON dossier_followups
+    USING (tenant_id = current_setting('app.tenant_id', true))
+    WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+-- RPC: upsert followup (called from memoriser_appel when suivi_requis is set)
+CREATE OR REPLACE FUNCTION upsert_followup(
+    p_tenant_id TEXT,
+    p_mutuelle_nom TEXT,
+    p_dossier_ref TEXT,
+    p_state TEXT,
+    p_note TEXT DEFAULT NULL,
+    p_callback_after TIMESTAMPTZ DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO dossier_followups (tenant_id, mutuelle_nom, dossier_ref, state, note, callback_after)
+    VALUES (p_tenant_id, p_mutuelle_nom, p_dossier_ref, p_state, p_note, p_callback_after)
+    ON CONFLICT (tenant_id, dossier_ref) DO UPDATE SET
+        state = EXCLUDED.state,
+        note = COALESCE(EXCLUDED.note, dossier_followups.note),
+        callback_after = COALESCE(EXCLUDED.callback_after, dossier_followups.callback_after),
+        updated_at = NOW(),
+        resolved_at = CASE WHEN EXCLUDED.state = 'resolved' THEN NOW() ELSE NULL END;
+END;
+$$;
+
+-- Staleness: apprentissages older than 90 days + low occurrence get pruned on load
+-- This filter is applied in MutuelleMemory.load() Python code, not in the RPC
+-- (to avoid migrating the existing get_mutuelle_memory RPC).

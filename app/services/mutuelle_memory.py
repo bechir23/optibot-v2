@@ -195,4 +195,68 @@ class MutuelleMemory:
         if stats:
             parts.append(f"Historique: {', '.join(stats)}")
 
+        # Phase 6: open followups for this dossier (from dossier_followups table)
+        open_items = memory.get("open_items", [])
+        if open_items:
+            lines = []
+            for item in open_items[:3]:  # cap to avoid prompt bloat
+                state = item.get("state", "?")
+                note = item.get("note", "")
+                cb = item.get("callback_after")
+                cb_text = f" (rappel apres {cb[:10]})" if cb else ""
+                lines.append(f"- {state}: {note}{cb_text}")
+            parts.append("Suivis en cours pour ce dossier:\n" + "\n".join(lines))
+
         return "\n".join(parts)
+
+    async def load_open_items(
+        self,
+        tenant_id: str,
+        mutuelle: str,
+        dossier_ref: str,
+    ) -> list[dict[str, Any]]:
+        """Load active (non-resolved) followups for THIS dossier.
+
+        Phase 6: enables cross-call dossier continuity. E.g. call 1 notes
+        "document X awaiting"; call 2 automatically sees this context.
+        """
+        if not tenant_id or not mutuelle or not dossier_ref:
+            return []
+        try:
+            rows = await self._supabase.select(
+                "dossier_followups",
+                {"tenant_id": tenant_id, "dossier_ref": dossier_ref},
+                limit=10,
+            )
+            # Exclude resolved items
+            return [r for r in rows if r.get("state") != "resolved"]
+        except Exception as e:
+            logger.debug("load_open_items failed (non-critical): %s", e)
+            return []
+
+    async def upsert_followup(
+        self,
+        tenant_id: str,
+        mutuelle: str,
+        dossier_ref: str,
+        state: str,
+        note: str = "",
+        callback_after: str | None = None,
+    ) -> None:
+        """Write or update a dossier followup.
+
+        state: 'awaiting_doc' | 'callback_scheduled' | 'resolved'
+        """
+        if not tenant_id or not mutuelle or not dossier_ref:
+            return
+        try:
+            await self._supabase.rpc("upsert_followup", {
+                "p_tenant_id": tenant_id,
+                "p_mutuelle_nom": mutuelle,
+                "p_dossier_ref": dossier_ref,
+                "p_state": state,
+                "p_note": note or None,
+                "p_callback_after": callback_after,
+            })
+        except Exception as e:
+            logger.warning("upsert_followup failed: %s", e)
