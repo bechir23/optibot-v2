@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     api_key: str = ""
     api_auth_required: bool = True
     dossier_encryption_key: str = ""
+    # Phase 5 Blocker 4: when True, API auth queries tenant_api_keys table
+    # instead of matching the single global api_key. Required for >1 customer.
+    use_multi_tenant_auth: bool = False
 
     # ── Feature flags (Microsoft pattern: runtime-tunable) ──
     answer_soft_timeout_sec: float = 4.0

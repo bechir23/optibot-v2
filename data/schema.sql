@@ -141,3 +141,84 @@ CREATE POLICY tenant_insert_calls ON call_log
 
 CREATE POLICY tenant_update_calls ON call_log
     FOR UPDATE USING (tenant_id = current_setting('app.tenant_id', true));
+
+-- ══════════════════════════════════════════════════════════════════
+-- Phase 5 Production Blockers: multi-tenant auth, transcript, recording
+-- ══════════════════════════════════════════════════════════════════
+
+-- Blocker 4a: Per-tenant API keys (SHA-256 hashed)
+CREATE TABLE IF NOT EXISTS tenant_api_keys (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    key_hash TEXT NOT NULL UNIQUE,       -- sha256 of raw key
+    key_prefix TEXT NOT NULL,            -- first 12 chars for log correlation
+    label TEXT,                           -- "prod", "staging", "office-1"
+    active BOOLEAN DEFAULT TRUE,
+    last_used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    revoked_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_apikey_hash ON tenant_api_keys(key_hash) WHERE active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_apikey_tenant ON tenant_api_keys(tenant_id);
+
+-- Tenants: add consent + recording + webhook columns (idempotent)
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS consent_disclosure TEXT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS recording_enabled BOOLEAN DEFAULT FALSE;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS webhook_url TEXT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS webhook_secret TEXT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
+
+-- Blocker 3a: turn-by-turn transcript for ops UI
+CREATE TABLE IF NOT EXISTS call_transcript (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    call_id TEXT NOT NULL REFERENCES call_log(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    ts_ms BIGINT NOT NULL,               -- ms since call start
+    role TEXT NOT NULL,                   -- agent | user | system | tool
+    text TEXT NOT NULL,
+    tool_name TEXT,
+    tool_args JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_transcript_call ON call_transcript(call_id, ts_ms);
+CREATE INDEX IF NOT EXISTS idx_transcript_tenant ON call_transcript(tenant_id, created_at DESC);
+
+-- Blocker 2: RGPD-compliant call recordings (6-month retention)
+CREATE TABLE IF NOT EXISTS call_recordings (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    call_id TEXT NOT NULL REFERENCES call_log(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    egress_id TEXT NOT NULL UNIQUE,           -- LiveKit egress ID (EG_xxx)
+    status TEXT NOT NULL DEFAULT 'recording', -- recording|complete|failed|deleted
+    storage_url TEXT,                         -- from egress_ended webhook
+    storage_bucket TEXT,
+    file_size_bytes BIGINT,
+    duration_seconds FLOAT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at TIMESTAMPTZ,
+    retention_until TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '180 days',
+    consent_given BOOLEAN NOT NULL DEFAULT TRUE,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recordings_tenant ON call_recordings(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_recordings_retention ON call_recordings(retention_until);
+
+-- RLS on new tables
+ALTER TABLE tenant_api_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE call_transcript ENABLE ROW LEVEL SECURITY;
+ALTER TABLE call_recordings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_read_apikeys ON tenant_api_keys
+    FOR SELECT USING (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_read_transcript ON call_transcript
+    FOR SELECT USING (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_insert_transcript ON call_transcript
+    FOR INSERT WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_read_recordings ON call_recordings
+    FOR SELECT USING (tenant_id = current_setting('app.tenant_id', true));
+CREATE POLICY tenant_insert_recordings ON call_recordings
+    FOR INSERT WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+-- Tenant-scoped mutuelle overrides (nullable tenant_id = global default)
+ALTER TABLE mutuelle_action_overrides ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+ALTER TABLE mutuelle_ivr_maps ADD COLUMN IF NOT EXISTS tenant_id TEXT;

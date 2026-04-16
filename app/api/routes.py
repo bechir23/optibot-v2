@@ -4,7 +4,9 @@ from __future__ import annotations
 import logging
 import re
 
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header
+
+from app.api.tenant_auth import TenantContext, require_tenant
 from pydantic import BaseModel, field_validator
 
 from app.config.settings import Settings
@@ -105,11 +107,18 @@ async def health():
 
 
 @router.post("/api/call")
-async def initiate_call(request: CallRequest, authorization: str | None = Header(None)):
-    _check_auth(authorization)
+async def initiate_call(
+    request: CallRequest,
+    tenant: TenantContext = Depends(require_tenant),
+):
+    # Tenant comes from authenticated API key — NOT from request body.
+    # If caller sent a different tenant_id, log as a security warning.
+    if request.tenant_id.strip() and request.tenant_id != tenant.tenant_id:
+        logger.warning(
+            "tenant_id mismatch: body=%s auth=%s key_prefix=%s",
+            request.tenant_id, tenant.tenant_id, tenant.key_prefix,
+        )
 
-    if not request.tenant_id.strip():
-        raise HTTPException(status_code=400, detail="tenant_id is required")
     if not request.phone.strip():
         raise HTTPException(status_code=400, detail="phone is required")
     if not request.mutuelle.strip():
@@ -130,13 +139,13 @@ async def initiate_call(request: CallRequest, authorization: str | None = Header
         room_name = await dispatch_outbound_call(
             phone_number=request.phone,
             dossier=dossier,
-            tenant_id=request.tenant_id,
+            tenant_id=tenant.tenant_id,
         )
         return {
             "status": "dispatched",
             "room": room_name,
             "phone": request.phone,
-            "tenant_id": request.tenant_id,
+            "tenant_id": tenant.tenant_id,
         }
     except Exception as e:
         logger.error("Failed to dispatch call: %s", e)
@@ -146,9 +155,8 @@ async def initiate_call(request: CallRequest, authorization: str | None = Header
 @router.post("/api/schedule")
 async def schedule_calls(
     requests: list[CallRequest],
-    authorization: str | None = Header(None),
+    tenant: TenantContext = Depends(require_tenant),
 ):
-    _check_auth(authorization)
     if not requests:
         raise HTTPException(status_code=400, detail="Empty request list")
 
@@ -156,9 +164,11 @@ async def schedule_calls(
 
     results = []
     for req in requests:
-        if not req.tenant_id.strip():
-            results.append({"dossier_id": req.dossier_id, "status": "error", "detail": "tenant_id required"})
-            continue
+        if req.tenant_id.strip() and req.tenant_id != tenant.tenant_id:
+            logger.warning(
+                "schedule tenant_id mismatch: body=%s auth=%s",
+                req.tenant_id, tenant.tenant_id,
+            )
         try:
             room = await dispatch_outbound_call(
                 phone_number=req.phone,
@@ -171,7 +181,7 @@ async def schedule_calls(
                     "nir": req.nir,
                     "dossier_type": req.dossier_type,
                 },
-                tenant_id=req.tenant_id,
+                tenant_id=tenant.tenant_id,
             )
             results.append({"dossier_id": req.dossier_id, "status": "dispatched", "room": room})
         except Exception as e:
