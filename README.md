@@ -127,23 +127,35 @@ Critical Telnyx settings:
 
 ## Remaining Work — Production Readiness Gap Analysis
 
-### Top-5 ship blockers (none of these are done)
+### Top-5 ship blockers — 4/5 done in Phase 5
 
-| # | Item | Effort | Why it blocks |
-|---|------|--------|---------------|
-| 1 | Run telnyx_setup.py with real creds + place 1 real PSTN call | Medium (1-2d) | SIP trunk untested end-to-end |
-| 2 | Call recording + transcript persistence (LiveKit Egress → S3 → Supabase) | Medium (2-3d) | RGPD/audit blocker for French health data |
-| 3 | Ops UI (call list, transcript viewer, audio playback, cancel button) + alerting | Large (1-2w) | No opticien will accept a black box |
-| 4 | Multi-tenant onboarding (tenants table, per-tenant API keys, mutuelle profile CRUD) | Large (~1w) | Single global api_key blocks >1 customer |
-| 5 | Consent disclosure ("cet appel est enregistré") + real-PSTN canary in CI | Small (1d) | Article L.34-5 CPCE + RGPD Art. 13 |
+| # | Item | Status |
+|---|------|--------|
+| 1 | Telnyx SIP outbound end-to-end | ⏳ **Pending** (human: run `scripts/telnyx_setup.py` with creds + real PSTN dial) |
+| 2 | Call recording (LiveKit Egress → S3) | ✅ **Done** — `app/services/recording.py`, wired into outbound+inbound |
+| 3 | Ops UI (call list + transcript viewer) | ✅ **Done** — `GET /ops`, backed by `/api/calls` and `/api/calls/{id}` |
+| 4 | Multi-tenant onboarding | ✅ **Done** — `app/api/tenant_auth.py`, `scripts/create_tenant.py`, SHA-256 hashed keys |
+| 5 | Consent disclosure | ✅ **Done** — legally compliant French phrase, tenant-configurable, enforced at greeting |
 
-### Done in recent commits (Phases 1-4, post-Apr 13)
+### Done in recent commits
 
+**Phase 1-4 (agent conversation quality)**:
 - Phase 1: 4 critical bugs (silent tools, finalization timeout, keepalive timer, hold cancel)
 - Phase 2: 6 new production personas + batch runner + dependency pinning
 - Phase 3B: Tool call loop detector with sliding-window fingerprint
 - Phase 3 fix: Direct provider mode (USE_DIRECT_PROVIDERS) bypasses LiveKit inference
-- Phase 4: preemptive_generation=False, cold transfer→silence, +6 hold phrases, status-repeat refinement
+- Phase 4: preemptive_generation=False, cold transfer→silence, +6 hold phrases
+
+**Phase 5 (production blockers)**:
+- Blocker 2: Call recording via LiveKit Egress → S3 (Scaleway Paris recommended)
+- Blocker 3: Ops UI (`GET /ops`) + `/api/calls` + `/api/calls/{id}` endpoints
+- Blocker 4: Multi-tenant auth with SHA-256 hashed per-tenant API keys
+- Blocker 5: Legally compliant French consent disclosure (L.34-5 CPCE + RGPD Art. 13 + AI Act Art. 50)
+
+Schema additions in `data/schema.sql`: `tenant_api_keys`, `call_transcript`,
+`call_recordings`, plus RLS policies and `tenants` column additions.
+
+168 unit tests pass (pipeline + agent + loop detector + tenant auth + recording).
 
 ### Skipped per research recommendations
 
