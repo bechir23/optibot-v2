@@ -555,6 +555,37 @@ class OutboundCallerAgent(Agent):
             except Exception as e:
                 logger.error("Failed to store RAG summary: %s", e)
 
+        # Phase 7A: Post-call LLM analysis pass (VAPI-style end-of-call report).
+        # Re-reads the full chat_ctx transcript and extracts structured data +
+        # success rubric. Catches what live tool-extraction missed.
+        analysis_data: dict = {}
+        try:
+            transcript = []
+            if self._session_ref and hasattr(self._session_ref, 'chat_ctx'):
+                for item in getattr(self._session_ref.chat_ctx, 'items', []):
+                    role = getattr(item, 'role', None) or getattr(item, 'type', None)
+                    text = getattr(item, 'text_content', None) or getattr(item, 'content', None)
+                    if isinstance(text, list):
+                        text = " ".join(p for p in text if isinstance(p, str))
+                    if text and role in ("user", "assistant", "agent"):
+                        transcript.append({"role": role, "text": str(text)})
+            if transcript:
+                from app.services.post_call_analysis import analyze_call
+                analysis = await analyze_call(transcript)
+                analysis_data = analysis.model_dump()
+                # Merge extracted fields into self._extracted (analysis wins for missing fields)
+                for k in ("statut", "reference_mutuelle", "interlocuteur_nom", "motif_rejet",
+                          "code_lpp_incorrect", "document_manquant", "action_requise"):
+                    v = analysis_data.get(k)
+                    if v and not self._extracted.get(k):
+                        self._extracted[k] = v
+                if analysis.delai_jours and not self._extracted.get("delai_jours"):
+                    self._extracted["delai_jours"] = analysis.delai_jours
+                logger.info("Post-call analysis: score=%d/4, summary=%s",
+                            analysis.total_score(), analysis.summary_short[:80])
+        except Exception as e:
+            logger.warning("Post-call analysis failed (non-critical): %s", e)
+
         # Webhook: POST call outcome to external URL (CRM, n8n, etc.)
         # Fire-and-forget — don't block finalization on webhook delivery.
         from app.config.settings import Settings
@@ -576,6 +607,8 @@ class OutboundCallerAgent(Agent):
                             k: v for k, v in self._extracted.items()
                             if k not in ("nir",)  # PII exclusion
                         },
+                        # Phase 7A: include structured analysis + success score
+                        "analysis": analysis_data,
                     }
                     async with httpx.AsyncClient(timeout=_settings.webhook_timeout_sec) as client:
                         resp = await client.post(_settings.webhook_url, json=payload)
