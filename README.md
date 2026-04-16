@@ -152,10 +152,16 @@ Critical Telnyx settings:
 - Blocker 4: Multi-tenant auth with SHA-256 hashed per-tenant API keys
 - Blocker 5: Legally compliant French consent disclosure (L.34-5 CPCE + RGPD Art. 13 + AI Act Art. 50)
 
-Schema additions in `data/schema.sql`: `tenant_api_keys`, `call_transcript`,
-`call_recordings`, plus RLS policies and `tenants` column additions.
+**Phase 6 (MS call-center-ai parity + memory)**:
+- Persistent conversation memory: load + open items across calls (dossier_followups)
+- Anti-fragmentation suppressor: prevents consecutive agent turns (fixes viamedis/multiple_matches)
+- LLM hard timeout wired (answer_hard_timeout_sec=15s) — graceful abort on runaway LLM
+- memoriser_appel tool: +3 args (suivi_requis, statut_dossier, rappel_apres)
 
-168 unit tests pass (pipeline + agent + loop detector + tenant auth + recording).
+Schema additions: `tenant_api_keys`, `call_transcript`, `call_recordings`,
+`dossier_followups` + RLS policies + `upsert_followup` RPC.
+
+**179 unit tests pass** (pipeline + agent + loop detector + tenant auth + recording + memory).
 
 ### Skipped per research recommendations
 
